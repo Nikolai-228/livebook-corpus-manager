@@ -11,6 +11,7 @@ env/
 *.json
 !config_example.py
 !key-example.json
+!service-account-key.json
 
 # IDE
 .vscode/
