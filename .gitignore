@@ -1,0 +1,42 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.env
+*.egg-info/
+
+# Google Drive API ключи (ЭТО ВАЖНО!)
+*.json
+!config_example.py
+!key-example.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Логи
+*.log
+
+# Базы данных
+*.db
+*.sqlite
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# Frontend
+node_modules/
+npm-debug.log*
+build/
+dist/
+
+# Временные файлы парсера
+temp/
+downloads/
