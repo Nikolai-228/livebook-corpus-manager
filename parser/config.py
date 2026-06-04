@@ -3,7 +3,7 @@
 import os
 
 # Google Drive Service Account
-SERVICE_ACCOUNT_FILE = r'C:\Users\Коля\Desktop\practica\API\livebook-parser-265c1e8112e9.json'
+SERVICE_ACCOUNT_FILE = r'C:\Users\HUAWEI\Desktop\practica\API\livebook-parser-265c1e8112e9.json'
 
 # Список всех разделов с их ID и названиями
 CHAPTERS = [
