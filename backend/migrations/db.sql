@@ -1,4 +1,4 @@
--- Создание базы данных (если нужно создать саму БД)
+-- Только если нет хостинга!
 CREATE DATABASE livebook_corpus
     WITH
     OWNER = your_username
