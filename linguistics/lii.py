@@ -1,3 +1,4 @@
+# ЭТО КОРОЧЕ ФАЙЛ КОТОРЫЙ ЗАПИСЫВАЕТ ВСЕ РЕЗЫ ПОИСКА В БД. НЕ ИСПОЛЬЗОВАТЬ!
 import psycopg2
 from psycopg2 import sql
 from nltk.tokenize import word_tokenize
