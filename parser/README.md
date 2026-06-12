@@ -18,9 +18,13 @@
 ```
 parser/
 ├── config.py                # Конфигурация: API-ключи, разделы, БД
+
 ├── db_utils.py              # Утилиты для работы с PostgreSQL
+
 ├── text_extractor.py        # Извлечение текста и изображений из файлов
+
 ├── parse_all_chapters.py    # Основной скрипт запуска парсинга
+
 └── livebook-parser-265c1e8112e9.json  # Ключ сервисного аккаунта Google
 ```
 
@@ -230,4 +234,3 @@ chapters (id, name)
 
 **Автор:** Николай  
 **Проект:** [livebook-corpus-manager](https://github.com/Nikolai-228/livebook-corpus-manager)
-```
