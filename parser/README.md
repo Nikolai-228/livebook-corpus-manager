@@ -17,6 +17,7 @@
 
 ```
 parser/
+
 ├── config.py                # Конфигурация: API-ключи, разделы, БД
 
 ├── db_utils.py              # Утилиты для работы с PostgreSQL
