@@ -5,6 +5,7 @@ from pymorphy3 import MorphAnalyzer
 import nltk
 import re
 from collections import Counter
+import json
 
 # Скачиваем необходимые данные
 try:
@@ -35,8 +36,97 @@ def connect_db():
     return psycopg2.connect(**DB_CONFIG)
 
 
+def get_all_documents():
+    """Получает список всех документов из БД с информацией о лемматизации"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT d.id, d.title, d.type, 
+                       CASE WHEN dl.content IS NOT NULL THEN true ELSE false END as has_lemmas
+                FROM documents d
+                LEFT JOIN documents_lemmatized dl ON d.id = dl.id_documents
+                WHERE d.content IS NOT NULL AND d.content != ''
+                ORDER BY d.id
+            """)
+            documents = cur.fetchall()
+        return documents
+    except Exception as e:
+        print(f"Ошибка при получении списка документов: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_document_content(doc_id: int):
+    """Получает содержимое документа из таблицы documents"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT title, content, type 
+                FROM documents 
+                WHERE id = %s
+            """, (doc_id,))
+            result = cur.fetchone()
+            if result:
+                return {
+                    'title': result[0],
+                    'content': result[1],
+                    'type': result[2]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении документа: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_lemmatized_text(doc_id: int):
+    """Получает лемматизированный текст из таблицы documents_lemmatized"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT content
+                FROM documents_lemmatized 
+                WHERE id_documents = %s
+            """, (doc_id,))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении лемматизированного текста: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_all_documents_with_lemmas():
+    """Получает все документы с лемматизированным текстом"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT d.id, d.title, d.type, dl.content, d.content
+                FROM documents d
+                INNER JOIN content dl ON d.id = dl.id_documents
+                WHERE d.content IS NOT NULL AND d.content != ''
+                ORDER BY d.id
+            """)
+            documents = cur.fetchall()
+        return documents
+    except Exception as e:
+        print(f"Ошибка при получении документов с леммами: {e}")
+        return []
+    finally:
+        conn.close()
+
+
 def lemmatize_text(text: str, morph) -> list:
-    """Лемматизация текста"""
+    """Лемматизация текста (для поискового запроса)"""
     if not text:
         return []
 
@@ -60,28 +150,27 @@ def lemmatize_text(text: str, morph) -> list:
     return lemmas
 
 
-def get_all_documents():
-    """Получает список всех документов из БД"""
-    conn = connect_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, type 
-                FROM documents 
-                WHERE content IS NOT NULL AND content != ''
-                ORDER BY id
-            """)
-            documents = cur.fetchall()
-        return documents
-    except Exception as e:
-        print(f"Ошибка при получении списка документов: {e}")
-        return []
-    finally:
-        conn.close()
+def find_all_contexts(text: str, word: str, context_size: int = 70) -> list:
+    """Находит все контексты для слова в тексте"""
+    contexts = []
+    text_lower = text.lower()
+    pos = 0
+    word_lower = word.lower()
+
+    while True:
+        found = text_lower.find(word_lower, pos)
+        if found == -1:
+            break
+        start = max(0, found - context_size)
+        end = min(len(text), found + len(word) + context_size)
+        contexts.append(text[start:end].replace('\n', ' '))
+        pos = found + 1
+
+    return contexts
 
 
 def search_unigrams(search_word: str, limit: int = 20):
-    """Поиск по униграммам (отдельным словам)"""
+    """Поиск по униграммам (отдельным словам) с использованием лемматизированных документов"""
     print(f"\n{'=' * 60}")
     print(f"🔍 ПОИСК ПО УНИГРАММАМ: '{search_word}'")
     print(f"{'=' * 60}")
@@ -97,53 +186,77 @@ def search_unigrams(search_word: str, limit: int = 20):
             return
         search_lemma = search_lemma[0]
 
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, content 
-                FROM documents 
-                WHERE content IS NOT NULL AND content != ''
-            """)
-            documents = cur.fetchall()
+        print(f"🔑 Лемма для поиска: '{search_lemma}'")
+
+        # Получаем все документы с лемматизированным текстом
+        documents = get_all_documents_with_lemmas()
+
+        if not documents:
+            print("❌ Нет документов с лемматизированным текстом")
+            return
 
         results = []
-        for doc_id, title, content in documents:
-            if not content:
+        for doc_id, title, doc_type, lemmatized_text, original_content in documents:
+            if not lemmatized_text or not original_content:
                 continue
 
-            lemmas = lemmatize_text(content, morph)
-            freq = lemmas.count(search_lemma)
+            # Разбиваем лемматизированный текст на леммы
+            lemmas_list = lemmatized_text.split()
+
+            # Подсчитываем частоту леммы
+            freq = lemmas_list.count(search_lemma)
 
             if freq > 0:
-                # Находим контексты
-                contexts = []
-                text_lower = content.lower()
-                pos = 0
-                while len(contexts) < 3:
-                    found = text_lower.find(search_word.lower(), pos)
-                    if found == -1:
-                        break
-                    start = max(0, found - 50)
-                    end = min(len(content), found + len(search_word) + 50)
-                    contexts.append(content[start:end].replace('\n', ' '))
-                    pos = found + 1
+                # Находим ВСЕ контексты в оригинальном тексте
+                contexts = find_all_contexts(original_content, search_word, 70)
+
+                # Важно: количество контекстов должно совпадать с частотой
+                # Если контекстов меньше, чем частота, ищем также по лемме
+                if len(contexts) < freq:
+                    # Ищем по лемме в оригинальном тексте
+                    lemm_contexts = find_all_contexts(original_content, search_lemma, 70)
+                    # Добавляем недостающие контексты
+                    for ctx in lemm_contexts:
+                        if ctx not in contexts:
+                            contexts.append(ctx)
+
+                # Обрезаем до частоты, если контекстов больше
+                contexts = contexts[:freq]
 
                 results.append({
                     'id': doc_id,
-                    'title': title[:100] if title else "Без названия",
+                    'title': title[:150] if title else "Без названия",
+                    'type': doc_type if doc_type else "Не указан",
                     'frequency': freq,
+                    'total_lemmas': len(lemmas_list),
                     'contexts': contexts
                 })
 
         results.sort(key=lambda x: x['frequency'], reverse=True)
 
-        print(f"\nНайдено документов: {len(results[:limit])}")
+        print(f"\n✅ Найдено документов: {len(results[:limit])}")
         for r in results[:limit]:
             print(f"\n📄 Документ ID: {r['id']}")
             print(f"   Название: {r['title']}")
-            print(f"   Частота вхождения: {r['frequency']}")
-            for i, ctx in enumerate(r['contexts'][:2]):
-                ctx_clean = re.sub(r'\s+', ' ', ctx)
-                print(f"   Контекст {i + 1}: ...{ctx_clean[:150]}...")
+            print(f"   Тип файла: {r['type']}")
+            print(f"   Частота вхождения леммы '{search_lemma}': {r['frequency']}")
+            print(f"   Всего лемм в документе: {r['total_lemmas']}")
+            print(f"   Всего контекстов: {len(r['contexts'])}")
+
+            # Проверка соответствия
+            if len(r['contexts']) == r['frequency']:
+                print(f"   ✅ Количество контекстов соответствует частоте")
+            else:
+                print(f"   ⚠️ Количество контекстов ({len(r['contexts'])}) не совпадает с частотой ({r['frequency']})")
+
+            print(f"   {'─' * 50}")
+            if r['contexts']:
+                for i, ctx in enumerate(r['contexts'], 1):
+                    ctx_clean = re.sub(r'\s+', ' ', ctx)
+                    print(f"   Контекст {i}: ...{ctx_clean}...")
+            else:
+                print("   Контексты не найдены")
+            print(f"   {'─' * 50}")
 
     except Exception as e:
         print(f"Ошибка: {e}")
@@ -157,73 +270,98 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
     print(f"📊 ТОП-{top_n} УНИГРАММ В ДОКУМЕНТЕ ID: {doc_id}")
     print(f"{'=' * 60}")
 
-    morph = MorphAnalyzer()
-    conn = connect_db()
-
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, content, type 
-                FROM documents 
-                WHERE id = %s AND content IS NOT NULL AND content != ''
-            """, (doc_id,))
-            document = cur.fetchone()
+        # Получаем информацию о документе
+        doc_info = get_document_content(doc_id)
+        if not doc_info:
+            print(f"❌ Документ с ID {doc_id} не найден")
+            return
 
-            if not document:
-                print(f"❌ Документ с ID {doc_id} не найден или не содержит текста")
-                return
+        # Получаем лемматизированный текст
+        lemmatized_text = get_lemmatized_text(doc_id)
+        if not lemmatized_text:
+            print(f"❌ Для документа ID {doc_id} нет лемматизированной версии")
+            print("   Сначала запустите скрипт для лемматизации документов")
+            return
 
-            doc_id, title, content, doc_type = document
+        print(f"\n📄 Информация о документе:")
+        print(f"   ID: {doc_id}")
+        print(f"   Название: {doc_info['title'][:150] if doc_info['title'] else 'Без названия'}")
+        print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
+        print(f"   Размер текста: {len(doc_info['content'])} символов")
 
-            print(f"\n📄 Информация о документе:")
-            print(f"   ID: {doc_id}")
-            print(f"   Название: {title[:150] if title else 'Без названия'}")
-            print(f"   Тип файла: {doc_type if doc_type else 'Не указан'}")
-            print(f"   Размер текста: {len(content)} символов")
+        # Разбиваем лемматизированный текст на леммы
+        print(f"\n🔄 Обработка лемматизированного текста...")
+        lemmas_list = lemmatized_text.split()
+        print(f"   Всего лемм в документе: {len(lemmas_list)}")
 
-            # Лемматизируем текст
-            print(f"\n🔄 Выполняется лемматизация текста...")
-            lemmas = lemmatize_text(content, morph)
-            print(f"   Получено лемм: {len(lemmas)}")
+        # Подсчитываем частоту каждой леммы
+        lemma_freq = Counter(lemmas_list)
 
-            # Подсчитываем частоту каждой леммы
-            lemma_freq = Counter(lemmas)
+        # Получаем топ-N лемм
+        top_lemmas = lemma_freq.most_common(top_n)
 
-            # Получаем топ-N лемм
-            top_lemmas = lemma_freq.most_common(top_n)
+        print(f"\n📊 ТОП-{top_n} САМЫХ ЧАСТЫХ УНИГРАММ (ЛЕММ):")
+        print(f"{'─' * 60}")
 
-            print(f"\n📊 ТОП-{top_n} САМЫХ ЧАСТЫХ УНИГРАММ (ЛЕММ):")
-            print(f"{'─' * 60}")
+        for i, (lemma, freq) in enumerate(top_lemmas, 1):
+            # Находим ВСЕ контексты для каждой топ-леммы в оригинальном тексте
+            contexts = []
+            if doc_info['content']:
+                # Сначала ищем лемму в оригинальном тексте
+                contexts = find_all_contexts(doc_info['content'], lemma, 60)
 
-            for i, (lemma, freq) in enumerate(top_lemmas, 1):
-                # Находим контекст для каждой топ-леммы
-                contexts = []
-                text_lower = content.lower()
-                pos = 0
-                while len(contexts) < 2:  # Показываем 2 контекста для каждой леммы
-                    # Ищем оригинальное слово (не лемму) в тексте
-                    found = text_lower.find(lemma, pos)
-                    if found == -1:
-                        break
-                    start = max(0, found - 40)
-                    end = min(len(content), found + len(lemma) + 40)
-                    contexts.append(content[start:end].replace('\n', ' '))
-                    pos = found + 1
+                # Если контекстов меньше, чем частота, ищем по разным формам слова
+                if len(contexts) < freq:
+                    # Пробуем искать слово в разных формах
+                    morph = MorphAnalyzer()
+                    # Получаем все формы слова
+                    try:
+                        parsed = morph.parse(lemma)[0]
+                        # Ищем все возможные формы
+                        for form in parsed.lexeme:
+                            if form.word != lemma:
+                                more_contexts = find_all_contexts(doc_info['content'], form.word, 60)
+                                for ctx in more_contexts:
+                                    if ctx not in contexts:
+                                        contexts.append(ctx)
+                    except Exception:
+                        pass
 
-                print(f"\n{i:2d}. Слово: \"{lemma}\"")
-                print(f"    Частота: {freq} раз(а)")
-                if contexts:
-                    print(f"    Пример контекста: ...{contexts[0][:100]}...")
+            # Обрезаем до частоты, если контекстов больше
+            contexts = contexts[:freq]
 
-            # Дополнительная статистика
-            print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
-            print(f"   Всего уникальных слов: {len(lemma_freq)}")
-            print(f"   Всего слов (с повторениями): {len(lemmas)}")
+            print(f"\n{i:2d}. Лемма: \"{lemma}\"")
+            print(f"    Частота: {freq} раз(а)")
+            print(f"    Всего контекстов: {len(contexts)}")
+
+            # Проверка соответствия
+            if len(contexts) == freq:
+                print(f"    ✅ Количество контекстов соответствует частоте")
+            else:
+                print(f"    ⚠️ Количество контекстов ({len(contexts)}) не совпадает с частотой ({freq})")
+
+            if contexts:
+                print(f"    Контексты:")
+                for j, ctx in enumerate(contexts, 1):
+                    ctx_clean = re.sub(r'\s+', ' ', ctx)
+                    print(f"      {j}. ...{ctx_clean[:150]}...")
+                    if len(ctx_clean) > 150:
+                        print(f"         ...{ctx_clean[150:]}...")
+            else:
+                print("    Контексты не найдены")
+
+        # Дополнительная статистика
+        print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
+        print(f"   Всего уникальных лемм: {len(lemma_freq)}")
+        print(f"   Всего лемм (с повторениями): {len(lemmas_list)}")
+        if top_lemmas:
+            print(f"   Самая частотная лемма: '{top_lemmas[0][0]}' ({top_lemmas[0][1]} раз)")
+            if len(top_lemmas) > 1:
+                print(f"   Вторая по частотности: '{top_lemmas[1][0]}' ({top_lemmas[1][1]} раз)")
 
     except Exception as e:
         print(f"❌ Ошибка: {e}")
-    finally:
-        conn.close()
 
 
 def show_documents_list():
@@ -234,16 +372,17 @@ def show_documents_list():
         print("❌ Нет доступных документов")
         return None
 
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 70}")
     print("📚 СПИСОК ДОСТУПНЫХ ДОКУМЕНТОВ")
-    print(f"{'=' * 60}")
-    print(f"\n{'ID':<6} {'Тип':<12} {'Название'}")
-    print(f"{'─' * 60}")
+    print(f"{'=' * 70}")
+    print(f"\n{'ID':<6} {'Тип':<12} {'Лемматизирован':<18} {'Название'}")
+    print(f"{'─' * 70}")
 
-    for doc_id, title, doc_type in documents:
+    for doc_id, title, doc_type, has_lemmas in documents:
         title_short = title[:50] if title else "Без названия"
         doc_type_short = doc_type[:10] if doc_type else "Не указан"
-        print(f"{doc_id:<6} {doc_type_short:<12} {title_short}")
+        has_lemmas_str = "✅ Да" if has_lemmas else "❌ Нет"
+        print(f"{doc_id:<6} {doc_type_short:<12} {has_lemmas_str:<18} {title_short}")
 
     return documents
 
@@ -267,8 +406,19 @@ def interactive_top_unigrams():
             doc_id = int(doc_id)
 
             # Проверяем существует ли документ
-            doc_exists = any(doc[0] == doc_id for doc in documents)
+            doc_exists = False
+            has_lemmas = False
+            for doc in documents:
+                if doc[0] == doc_id:
+                    doc_exists = True
+                    has_lemmas = doc[3]
+                    break
+
             if doc_exists:
+                if not has_lemmas:
+                    print(f"⚠️ Для документа ID {doc_id} нет лемматизированной версии")
+                    print("   Сначала запустите скрипт для лемматизации документов")
+                    continue
                 break
             else:
                 print(f"❌ Документ с ID {doc_id} не найден. Попробуйте снова.")
@@ -278,16 +428,31 @@ def interactive_top_unigrams():
             print("\n👋 Отмена")
             return
 
-    # Выводим топ-20 униграмм
-    get_top_unigrams_in_document(doc_id, 20)
+    # Ввод количества униграмм для вывода
+    while True:
+        try:
+            top_n = input("\n👉 Введите количество униграмм для вывода (по умолчанию 20): ").strip()
+            if not top_n:
+                top_n = 20
+                break
+            top_n = int(top_n)
+            if 1 <= top_n <= 100:
+                break
+            else:
+                print("❌ Пожалуйста, введите число от 1 до 100")
+        except ValueError:
+            print("❌ Пожалуйста, введите корректное число")
+
+    # Выводим топ униграмм
+    get_top_unigrams_in_document(doc_id, top_n)
 
 
 if __name__ == "__main__":
-    print("🔍 СИСТЕМА ПОИСКА УНИГРАММ")
+    print("🔍 СИСТЕМА ПОИСКА УНИГРАММ (на основе лемматизированных документов)")
     print("=" * 60)
     print("\nВыберите режим работы:")
     print("1 - Поиск по конкретному слову во всех документах")
-    print("2 - Вывести топ-20 униграмм по конкретному документу")
+    print("2 - Вывести топ-N униграмм по конкретному документу")
 
     choice = input("\n👉 Ваш выбор (1/2): ").strip()
 

@@ -6,7 +6,9 @@ from nltk.corpus import stopwords
 from pymorphy3 import MorphAnalyzer
 import nltk
 import re
+from collections import Counter
 
+# Скачиваем необходимые данные
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
@@ -24,72 +26,463 @@ DB_CONFIG = {
 
 RUSSIAN_STOP_WORDS = set(stopwords.words('russian'))
 
-PROTECTED_WORDS = {'ижгту'}
-
 
 def connect_db():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def preprocess_text(text: str, morph) -> list:
-    """Предобработка текста: токенизация и лемматизация"""
-    if not text:
-        return []
-
-    text = re.sub(r'[^\w\s]', ' ', text.lower())
-    tokens = word_tokenize(text, language='russian')
-    tokens = [t for t in tokens if t.isalpha() and t not in RUSSIAN_STOP_WORDS]
-
-    lemmas = []
-    for token in tokens:
-        if token in PROTECTED_WORDS:
-            lemmas.append(token)
-            continue
-        try:
-            lemma = morph.parse(token)[0].normal_form
-            if len(lemma) >= 2:
-                lemmas.append(lemma)
-        except Exception:
-            pass
-
-    return lemmas
-
-
-def get_all_documents():
-    """Получает список всех документов из БД"""
+def get_all_documents_with_lemmas():
+    """Получает все документы с лемматизированным текстом и названиями"""
     conn = connect_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT id, title, type 
-                FROM documents 
-                WHERE content IS NOT NULL AND content != ''
-                ORDER BY id
+                SELECT d.id, d.title, d.type, dl.content
+                FROM documents d
+                INNER JOIN documents_lemmatized dl ON d.id = dl.id_documents
+                WHERE dl.content IS NOT NULL AND dl.content != ''
+                ORDER BY d.id
             """)
             documents = cur.fetchall()
         return documents
     except Exception as e:
-        print(f"Ошибка при получении списка документов: {e}")
+        print(f"Ошибка при получении документов с леммами: {e}")
         return []
     finally:
         conn.close()
 
 
-def show_documents_list():
-    """Показывает список всех документов для выбора"""
-    documents = get_all_documents()
+def get_document_info(doc_id: int):
+    """Получает информацию о документе (название, тип)"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT title, type
+                FROM documents 
+                WHERE id = %s
+            """, (doc_id,))
+            result = cur.fetchone()
+            if result:
+                return {
+                    'title': result[0],
+                    'type': result[1]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении информации о документе: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_lemmatized_text(doc_id: int):
+    """Получает лемматизированный текст из таблицы documents_lemmatized"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT content
+                FROM documents_lemmatized 
+                WHERE id_documents = %s
+            """, (doc_id,))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении лемматизированного текста: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def find_lemmatized_trigram_contexts(lemmatized_text: str, word1: str, word2: str, word3: str,
+                                     context_size: int = 70) -> list:
+    """Находит ВСЕ контексты для триграммы в лемматизированном тексте"""
+    contexts = []
+    text_lower = lemmatized_text.lower()
+    pattern = re.compile(rf'{re.escape(word1.lower())}\s+{re.escape(word2.lower())}\s+{re.escape(word3.lower())}')
+
+    for match in pattern.finditer(text_lower):
+        start = max(0, match.start() - context_size)
+        end = min(len(lemmatized_text), match.end() + context_size)
+        context = lemmatized_text[start:end].replace('\n', ' ')
+        contexts.append(context)
+
+    return contexts
+
+
+def extract_trigrams_from_lemmatized(lemmatized_text: str, top_n: int = 50) -> list:
+    """
+    Извлекает триграммы из лемматизированного текста по частоте (без Likelihood Ratio)
+    """
+    if not lemmatized_text:
+        return []
+
+    # Разбиваем лемматизированный текст на леммы
+    tokens = lemmatized_text.lower().split()
+
+    # Фильтруем стоп-слова и слишком короткие слова
+    tokens = [t for t in tokens if t not in RUSSIAN_STOP_WORDS and len(t) > 1]
+
+    if len(tokens) < 3:
+        return []
+
+    # Создаем finder для триграмм
+    finder = TrigramCollocationFinder.from_words(tokens)
+
+    # Фильтруем редкие триграммы (встречаются менее 2 раз)
+    finder.apply_freq_filter(2)
+
+    # Получаем топ-N триграмм по частоте
+    trigrams_freq = finder.nbest(TrigramAssocMeasures.raw_freq, top_n)
+
+    # Формируем результат: (триграмма, частота)
+    result = []
+    for trigram in trigrams_freq:
+        freq = finder.ngram_fd[trigram]
+        result.append((trigram, freq))
+
+    return result
+
+
+def search_trigrams_by_word(search_word: str, top_n: int = 30):
+    """Поиск триграмм, содержащих заданное слово (по частоте)"""
+    print(f"\n{'=' * 70}")
+    print(f"🔍 ПОИСК ТРИГРАММ ПО ЧАСТОТЕ")
+    print(f"{'=' * 70}")
+    print(f"🔍 ПОИСК ТРИГРАММ, СОДЕРЖАЩИХ СЛОВО: '{search_word}'")
+    print(f"{'=' * 70}")
+
+    morph = MorphAnalyzer()
+
+    # Лемматизируем искомое слово
+    search_lemma = None
+    try:
+        parsed = morph.parse(search_word.lower())[0]
+        search_lemma = parsed.normal_form
+        print(f"🔑 Лемма слова: '{search_lemma}'")
+    except Exception as e:
+        print(f"⚠️ Не удалось определить лемму слова: {e}")
+        search_lemma = search_word.lower()
+
+    documents = get_all_documents_with_lemmas()
 
     if not documents:
-        print("❌ Нет доступных документов")
+        print("❌ Нет документов с лемматизированным текстом")
+        return
+
+    found_trigrams = []
+
+    for doc_id, title, doc_type, lemmatized_text in documents:
+        if not lemmatized_text:
+            continue
+
+        print(f"\n📄 Обработка документа: {title[:50] if title else 'Без названия'} (ID: {doc_id})")
+
+        # Извлекаем триграммы по частоте
+        trigrams = extract_trigrams_from_lemmatized(lemmatized_text, 100)
+
+        # Фильтруем триграммы, содержащие искомую лемму
+        filtered_trigrams = []
+        for trigram, freq in trigrams:
+            word1, word2, word3 = trigram
+
+            # Проверяем совпадение с леммой
+            if word1 == search_lemma or word2 == search_lemma or word3 == search_lemma:
+                filtered_trigrams.append((trigram, freq))
+
+        if filtered_trigrams:
+            for trigram, freq in filtered_trigrams:
+                # Находим ВСЕ контексты для ТОЧНОЙ триграммы
+                contexts = find_lemmatized_trigram_contexts(
+                    lemmatized_text,
+                    trigram[0],
+                    trigram[1],
+                    trigram[2]
+                )
+
+                found_trigrams.append({
+                    'doc_id': doc_id,
+                    'title': title[:100] if title else "Без названия",
+                    'type': doc_type if doc_type else "Не указан",
+                    'trigram': trigram,
+                    'trigram_text': f"{trigram[0]} {trigram[1]} {trigram[2]}",
+                    'frequency': freq,
+                    'contexts': contexts
+                })
+
+    # Сортируем по частоте (от большего к меньшему)
+    found_trigrams.sort(key=lambda x: x['frequency'], reverse=True)
+
+    print(f"\n✅ Найдено триграмм, содержащих лемму '{search_lemma}': {len(found_trigrams)}")
+
+    if found_trigrams:
+        print(f"\n📊 ТОП-{min(top_n, len(found_trigrams))} ТРИГРАММ С ЛЕММОЙ '{search_lemma}':")
+        print(f"{'─' * 70}")
+
+        for i, item in enumerate(found_trigrams[:top_n], 1):
+            print(f"\n{i:2d}. Триграмма (леммы): \"{item['trigram_text']}\"")
+            print(f"    Документ: {item['title']}")
+            print(f"    ID документа: {item['doc_id']}")
+            print(f"    Тип: {item['type']}")
+            print(f"    Частота: {item['frequency']} раз(а)")
+            print(f"    Количество контекстов: {len(item['contexts'])}")
+
+            if len(item['contexts']) == item['frequency']:
+                print(f"    ✅ Количество контекстов соответствует частоте")
+            else:
+                print(
+                    f"    ⚠️ Количество контекстов ({len(item['contexts'])}) не совпадает с частотой ({item['frequency']})")
+
+            if item['contexts']:
+                print(f"    ВСЕ КОНТЕКСТЫ в лемматизированном тексте:")
+                for j, ctx in enumerate(item['contexts'], 1):
+                    ctx_clean = re.sub(r'\s+', ' ', ctx)
+                    highlighted = ctx_clean.replace(
+                        item['trigram_text'],
+                        f"***{item['trigram_text']}***"
+                    )
+                    print(f"      {j}. ...{highlighted}...")
+            else:
+                print(f"    ⚠️ Контексты для точной триграммы не найдены")
+    else:
+        print(f"\n❌ Триграммы, содержащие лемму '{search_lemma}', не найдены")
+
+
+def get_document_trigrams(doc_id: int, top_n: int = 50):
+    """Получает топ-N триграмм для конкретного документа по частоте"""
+    print(f"\n{'=' * 70}")
+    print(f"📊 ТРИГРАММЫ ПО ЧАСТОТЕ")
+    print(f"{'=' * 70}")
+    print(f"📊 ТОП-{top_n} ТРИГРАММ В ДОКУМЕНТЕ ID: {doc_id}")
+    print(f"{'=' * 70}")
+
+    # Получаем информацию о документе
+    doc_info = get_document_info(doc_id)
+    if not doc_info:
+        print(f"❌ Документ с ID {doc_id} не найден")
+        return
+
+    # Получаем лемматизированный текст
+    lemmatized_text = get_lemmatized_text(doc_id)
+    if not lemmatized_text:
+        print(f"❌ Для документа ID {doc_id} нет лемматизированной версии")
+        return
+
+    print(f"\n📄 Информация о документе:")
+    print(f"   ID: {doc_id}")
+    print(f"   Название: {doc_info['title'][:150] if doc_info['title'] else 'Без названия'}")
+    print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
+    print(f"   Размер лемматизированного текста: {len(lemmatized_text)} символов")
+
+    # Извлекаем триграммы по частоте
+    trigrams = extract_trigrams_from_lemmatized(lemmatized_text, top_n)
+
+    if not trigrams:
+        print(f"\n❌ Триграммы не найдены в документе")
+        return
+
+    print(f"\n📊 ТОП-{len(trigrams)} ТРИГРАММ ПО ЧАСТОТЕ:")
+    print(f"{'─' * 70}")
+
+    for i, (trigram, freq) in enumerate(trigrams, 1):
+        trigram_text = ' '.join(trigram)
+
+        # Находим ВСЕ контексты для триграммы
+        contexts = find_lemmatized_trigram_contexts(
+            lemmatized_text,
+            trigram[0],
+            trigram[1],
+            trigram[2]
+        )
+
+        print(f"\n{i:2d}. Триграмма (леммы): \"{trigram_text}\"")
+        print(f"    Частота: {freq} раз(а)")
+        print(f"    Количество контекстов: {len(contexts)}")
+
+        if len(contexts) == freq:
+            print(f"    ✅ Количество контекстов соответствует частоте")
+        else:
+            print(f"    ⚠️ Количество контекстов ({len(contexts)}) не совпадает с частотой ({freq})")
+
+        if contexts:
+            print(f"    ВСЕ КОНТЕКСТЫ в лемматизированном тексте:")
+            for j, ctx in enumerate(contexts, 1):
+                ctx_clean = re.sub(r'\s+', ' ', ctx)
+                highlighted = ctx_clean.replace(
+                    trigram_text,
+                    f"***{trigram_text}***"
+                )
+                print(f"      {j}. ...{highlighted}...")
+        else:
+            print(f"    ⚠️ Контексты для точной триграммы не найдены")
+
+    # Статистика
+    print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
+    print(f"   Всего уникальных триграмм: {len(trigrams)}")
+    if trigrams:
+        print(f"   Самая частотная триграмма: '{' '.join(trigrams[0][0])}' ({trigrams[0][1]} раз)")
+
+
+def search_trigrams_by_frequency(doc_id: int = None, top_n: int = 30):
+    """
+    Поиск триграмм по частоте
+
+    Параметры:
+    - doc_id: ID документа (если None, то поиск по всем документам)
+    - top_n: количество триграмм для вывода
+    """
+    print(f"\n{'=' * 70}")
+    print(f"🔍 ПОИСК ТРИГРАММ ПО ЧАСТОТЕ")
+    print(f"{'=' * 70}")
+
+    if doc_id:
+        print(f"📊 ПОИСК В ДОКУМЕНТЕ ID: {doc_id}")
+    else:
+        print(f"📊 ПОИСК ПО ВСЕМ ДОКУМЕНТАМ")
+    print(f"{'=' * 70}")
+
+    if doc_id:
+        # Поиск в конкретном документе
+        doc_info = get_document_info(doc_id)
+        if not doc_info:
+            print(f"❌ Документ с ID {doc_id} не найден")
+            return
+
+        lemmatized_text = get_lemmatized_text(doc_id)
+        if not lemmatized_text:
+            print(f"❌ Для документа ID {doc_id} нет лемматизированной версии")
+            return
+
+        print(f"\n📄 Информация о документе:")
+        print(f"   ID: {doc_id}")
+        print(f"   Название: {doc_info['title'][:150] if doc_info['title'] else 'Без названия'}")
+        print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
+        print(f"   Размер лемматизированного текста: {len(lemmatized_text)} символов")
+
+        # Извлекаем триграммы по частоте
+        trigrams = extract_trigrams_from_lemmatized(lemmatized_text, top_n)
+
+        if not trigrams:
+            print(f"\n❌ Триграммы не найдены в документе")
+            return
+
+        print(f"\n📊 ТОП-{len(trigrams)} ТРИГРАММ ПО ЧАСТОТЕ:")
+        print(f"{'─' * 70}")
+
+        for i, (trigram, freq) in enumerate(trigrams, 1):
+            trigram_text = ' '.join(trigram)
+            contexts = find_lemmatized_trigram_contexts(
+                lemmatized_text,
+                trigram[0],
+                trigram[1],
+                trigram[2]
+            )
+
+            print(f"\n{i:2d}. Триграмма: \"{trigram_text}\"")
+            print(f"    Частота: {freq} раз(а)")
+            print(f"    Количество контекстов: {len(contexts)}")
+
+            if len(contexts) == freq:
+                print(f"    ✅ Количество контекстов соответствует частоте")
+            else:
+                print(f"    ⚠️ Количество контекстов ({len(contexts)}) не совпадает с частотой ({freq})")
+
+            if contexts:
+                print(f"    ВСЕ КОНТЕКСТЫ в лемматизированном тексте:")
+                for j, ctx in enumerate(contexts, 1):
+                    ctx_clean = re.sub(r'\s+', ' ', ctx)
+                    highlighted = ctx_clean.replace(
+                        trigram_text,
+                        f"***{trigram_text}***"
+                    )
+                    print(f"      {j}. ...{highlighted}...")
+            else:
+                print(f"    ⚠️ Контексты для точной триграммы не найдены")
+
+        # Статистика
+        print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
+        print(f"   Всего уникальных триграмм: {len(trigrams)}")
+        if trigrams:
+            print(f"   Самая частотная триграмма: '{' '.join(trigrams[0][0])}' ({trigrams[0][1]} раз)")
+
+    else:
+        # Поиск по всем документам
+        documents = get_all_documents_with_lemmas()
+        if not documents:
+            print("❌ Нет документов с лемматизированным текстом")
+            return
+
+        all_trigrams = []
+
+        print(f"\n📊 ОБРАБОТКА ВСЕХ ДОКУМЕНТОВ:")
+        print(f"{'─' * 70}")
+
+        for doc_id, title, doc_type, lemmatized_text in documents:
+            if not lemmatized_text:
+                continue
+
+            print(f"\n📄 Документ: {title[:50] if title else 'Без названия'} (ID: {doc_id})")
+
+            # Извлекаем триграммы по частоте
+            trigrams = extract_trigrams_from_lemmatized(lemmatized_text, top_n)
+
+            if trigrams:
+                print(f"   Тип: {doc_type if doc_type else 'Не указан'}")
+                print(f"   Найдено триграмм: {len(trigrams)}")
+                print(f"   Топ-{min(3, len(trigrams))} триграмм:")
+                for i, (trigram, freq) in enumerate(trigrams[:3], 1):
+                    print(f"     {i}. {' '.join(trigram)} (частота: {freq})")
+                if len(trigrams) > 3:
+                    print(f"     ... и еще {len(trigrams) - 3} триграмм")
+
+                # Сохраняем для общей статистики
+                for trigram, freq in trigrams:
+                    all_trigrams.append({
+                        'doc_id': doc_id,
+                        'title': title[:100] if title else "Без названия",
+                        'trigram': trigram,
+                        'trigram_text': f"{trigram[0]} {trigram[1]} {trigram[2]}",
+                        'frequency': freq
+                    })
+            else:
+                print(f"   ⚠️ Триграммы не найдены")
+
+        # Общая статистика по всем документам
+        if all_trigrams:
+            print(f"\n{'=' * 70}")
+            print(f"📊 ОБЩАЯ СТАТИСТИКА ПО ВСЕМ ДОКУМЕНТАМ")
+            print(f"{'=' * 70}")
+            print(f"   Всего триграмм: {len(all_trigrams)}")
+
+            # Топ-10 триграмм по частоте
+            all_trigrams.sort(key=lambda x: x['frequency'], reverse=True)
+            print(f"\n   ТОП-10 ТРИГРАММ ПО ЧАСТОТЕ:")
+            print(f"   {'─' * 60}")
+            for i, item in enumerate(all_trigrams[:10], 1):
+                print(f"   {i:2d}. \"{item['trigram_text']}\" (частота: {item['frequency']})")
+                print(f"       Документ: {item['title'][:60]} (ID: {item['doc_id']})")
+        else:
+            print(f"\n❌ Триграммы не найдены ни в одном документе")
+
+
+def show_documents_list():
+    """Показывает список всех документов для выбора"""
+    documents = get_all_documents_with_lemmas()
+
+    if not documents:
+        print("❌ Нет доступных документов с лемматизированным текстом")
         return None
 
-    print(f"\n{'=' * 60}")
-    print("📚 СПИСОК ДОСТУПНЫХ ДОКУМЕНТОВ")
-    print(f"{'=' * 60}")
+    print(f"\n{'=' * 70}")
+    print("📚 СПИСОК ДОКУМЕНТОВ С ЛЕММАТИЗИРОВАННЫМ ТЕКСТОМ")
+    print(f"{'=' * 70}")
     print(f"\n{'ID':<6} {'Тип':<12} {'Название'}")
-    print(f"{'─' * 60}")
+    print(f"{'─' * 70}")
 
-    for doc_id, title, doc_type in documents:
+    for doc_id, title, doc_type, _ in documents:
         title_short = title[:50] if title else "Без названия"
         doc_type_short = doc_type[:10] if doc_type else "Не указан"
         print(f"{doc_id:<6} {doc_type_short:<12} {title_short}")
@@ -97,264 +490,36 @@ def show_documents_list():
     return documents
 
 
-def search_trigrams(phrase: str, limit: int = 20):
-    """Поиск по триграммам с использованием NLTK"""
+def interactive_search():
+    """Интерактивный режим для поиска"""
     print(f"\n{'=' * 60}")
-    print(f"🔍 ПОИСК ПО ТРИГРАММАМ: '{phrase}'")
+    print("🔍 ПОИСК ТРИГРАММ ПО ЧАСТОТЕ")
     print(f"{'=' * 60}")
 
-    morph = MorphAnalyzer()
-    conn = connect_db()
+    print("\nВыберите режим работы с триграммами:")
+    print("1 - Поиск триграмм, содержащих конкретное слово")
+    print("2 - Показать топ-N триграмм в конкретном документе")
+    print("3 - Поиск триграмм по всем документам")
 
-    try:
-        # Получаем леммы искомой фразы
-        search_lemmas = preprocess_text(phrase, morph)
-        if len(search_lemmas) < 3:
-            print("Не удалось определить леммы для поиска (нужно 3 слова)")
-            return
-        search_trigram = ' '.join(search_lemmas[:3])
-
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, content 
-                FROM documents 
-                WHERE content IS NOT NULL AND content != ''
-            """)
-            documents = cur.fetchall()
-
-        results = []
-        for doc_id, title, content in documents:
-            if not content:
-                continue
-
-            lemmas = preprocess_text(content, morph)
-
-            # Находим триграммы
-            finder = TrigramCollocationFinder.from_words(lemmas)
-            finder.apply_freq_filter(1)
-
-            # Проверяем наличие искомой триграммы
-            found = False
-            freq = 0
-            for trigram, score in finder.score_ngrams(TrigramAssocMeasures().pmi):
-                trigram_text = ' '.join(trigram)
-                if trigram_text == search_trigram:
-                    found = True
-                    freq = finder.ngram_fd[trigram]
-                    break
-
-            if found:
-                # Находим контексты
-                contexts = []
-                text_lower = content.lower()
-                pos = 0
-                while len(contexts) < 3:
-                    found_pos = text_lower.find(phrase.lower(), pos)
-                    if found_pos == -1:
-                        break
-                    start = max(0, found_pos - 70)
-                    end = min(len(content), found_pos + len(phrase) + 70)
-                    contexts.append(content[start:end].replace('\n', ' '))
-                    pos = found_pos + 1
-
-                results.append({
-                    'id': doc_id,
-                    'title': title[:100] if title else "Без названия",
-                    'frequency': freq,
-                    'contexts': contexts
-                })
-
-        results.sort(key=lambda x: x['frequency'], reverse=True)
-
-        print(f"\nНайдено документов: {len(results[:limit])}")
-        for r in results[:limit]:
-            print(f"\n📄 Документ ID: {r['id']}")
-            print(f"   Название: {r['title']}")
-            print(f"   Частота вхождения: {r['frequency']}")
-            for i, ctx in enumerate(r['contexts'][:2]):
-                ctx_clean = re.sub(r'\s+', ' ', ctx)
-                print(f"   Контекст {i + 1}: ...{ctx_clean[:150]}...")
-
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    finally:
-        conn.close()
-
-
-def get_top_trigrams_all_documents(limit: int = 20):
-    """Извлечение наиболее частотных триграмм из всех документов"""
-    print(f"\n{'=' * 60}")
-    print(f"🔍 ТОП-{limit} ТРИГРАММ ПО ВСЕМ ДОКУМЕНТАМ")
-    print(f"{'=' * 60}")
-
-    morph = MorphAnalyzer()
-    conn = connect_db()
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT content 
-                FROM documents 
-                WHERE content IS NOT NULL AND content != ''
-            """)
-            documents = cur.fetchall()
-
-        # Собираем все леммы из всех документов
-        all_lemmas = []
-        for (content,) in documents:
-            if content:
-                lemmas = preprocess_text(content, morph)
-                all_lemmas.extend(lemmas)
-
-        # Находим триграммы
-        finder = TrigramCollocationFinder.from_words(all_lemmas)
-        finder.apply_freq_filter(2)
-
-        trigrams = []
-        for trigram, freq in finder.ngram_fd.items():
-            trigrams.append((' '.join(trigram), freq))
-
-        trigrams.sort(key=lambda x: x[1], reverse=True)
-
-        print(f"\n🏆 ТОП-{limit} ТРИГРАММ:")
-        for i, (trigram, freq) in enumerate(trigrams[:limit], 1):
-            print(f"   {i}. \"{trigram}\" (частота: {freq})")
-
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    finally:
-        conn.close()
-
-
-def get_top_trigrams_in_document(doc_id: int, top_n: int = 20):
-    """Выводит топ-N самых часто встречаемых триграмм в конкретном документе"""
-    print(f"\n{'=' * 60}")
-    print(f"📊 ТОП-{top_n} ТРИГРАММ В ДОКУМЕНТЕ ID: {doc_id}")
-    print(f"{'=' * 60}")
-
-    morph = MorphAnalyzer()
-    conn = connect_db()
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, content, type 
-                FROM documents 
-                WHERE id = %s AND content IS NOT NULL AND content != ''
-            """, (doc_id,))
-            document = cur.fetchone()
-
-            if not document:
-                print(f"❌ Документ с ID {doc_id} не найден или не содержит текста")
-                return
-
-            doc_id, title, content, doc_type = document
-
-            print(f"\n📄 Информация о документе:")
-            print(f"   ID: {doc_id}")
-            print(f"   Название: {title[:150] if title else 'Без названия'}")
-            print(f"   Тип файла: {doc_type if doc_type else 'Не указан'}")
-            print(f"   Размер текста: {len(content)} символов")
-
-            # Лемматизируем текст
-            print(f"\n🔄 Выполняется обработка текста...")
-            lemmas = preprocess_text(content, morph)
-            print(f"   Получено лемм: {len(lemmas)}")
-
-            # Находим триграммы
-            finder = TrigramCollocationFinder.from_words(lemmas)
-            finder.apply_freq_filter(1)
-
-            # Получаем все триграммы с частотами
-            trigrams_with_freq = []
-            for trigram, freq in finder.ngram_fd.items():
-                trigram_text = ' '.join(trigram)
-                # Фильтруем слишком короткие или служебные триграммы
-                if len(trigram_text) > 5:
-                    trigrams_with_freq.append((trigram_text, freq))
-
-            # Сортируем по частоте
-            trigrams_with_freq.sort(key=lambda x: x[1], reverse=True)
-
-            # Берем топ-N
-            top_trigrams = trigrams_with_freq[:top_n]
-
-            if not top_trigrams:
-                print(f"\n⚠️ В документе не найдено триграмм")
-                return
-
-            print(f"\n📊 ТОП-{top_n} САМЫХ ЧАСТЫХ ТРИГРАММ:")
-            print(f"{'─' * 60}")
-
-            for i, (trigram, freq) in enumerate(top_trigrams, 1):
-                # Находим контекст для каждой топ-триграммы
-                contexts = []
-                text_lower = content.lower()
-                pos = 0
-                while len(contexts) < 2:
-                    found = text_lower.find(trigram, pos)
-                    if found == -1:
-                        break
-                    start = max(0, found - 60)
-                    end = min(len(content), found + len(trigram) + 60)
-                    contexts.append(content[start:end].replace('\n', ' '))
-                    pos = found + 1
-
-                print(f"\n{i:2d}. Триграмма: \"{trigram}\"")
-                print(f"    Частота: {freq} раз(а)")
-                if contexts:
-                    print(f"    Пример контекста: ...{contexts[0][:120]}...")
-
-            # Дополнительная статистика
-            print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
-            print(f"   Всего уникальных триграмм: {len(trigrams_with_freq)}")
-            print(f"   Всего триграмм (с повторениями): {sum(freq for _, freq in trigrams_with_freq)}")
-
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-    finally:
-        conn.close()
-
-
-def interactive_top_trigrams():
-    """Интерактивный режим для выбора: все документы или конкретный"""
-    print(f"\n{'=' * 60}")
-    print("🔍 ИЗВЛЕЧЕНИЕ ТОП ТРИГРАММ")
-    print(f"{'=' * 60}")
-
-    print("\nВыберите режим:")
-    print("1 - По всем документам")
-    print("2 - По конкретному документу")
-
-    choice = input("\n👉 Ваш выбор (1/2): ").strip()
+    choice = input("\n👉 Ваш выбор (1/2/3): ").strip()
 
     if choice == '1':
-        # Ввод количества триграмм для вывода
-        try:
-            top_n = input("\n👉 Введите количество триграмм для вывода (по умолчанию 20): ").strip()
-            if not top_n:
-                top_n = 20
-            else:
-                top_n = int(top_n)
-            get_top_trigrams_all_documents(top_n)
-        except ValueError:
-            print("❌ Пожалуйста, введите корректное число")
-            get_top_trigrams_all_documents(20)
+        search_word = input("Введите слово для поиска: ").strip()
+        if search_word:
+            search_trigrams_by_word(search_word)
+        else:
+            print("❌ Слово не может быть пустым!")
 
     elif choice == '2':
-        # Показываем список документов
         documents = show_documents_list()
-
         if not documents:
             return
 
-        # Выбор документа
         while True:
             try:
                 doc_id = input(f"\n👉 Введите ID документа: ").strip()
                 doc_id = int(doc_id)
 
-                # Проверяем существует ли документ
                 doc_exists = any(doc[0] == doc_id for doc in documents)
                 if doc_exists:
                     break
@@ -366,41 +531,44 @@ def interactive_top_trigrams():
                 print("\n👋 Отмена")
                 return
 
-        # Ввод количества триграмм для вывода
-        try:
-            top_n = input("\n👉 Введите количество триграмм для вывода (по умолчанию 20): ").strip()
-            if not top_n:
-                top_n = 20
-            else:
+        while True:
+            try:
+                top_n = input(f"\n👉 Введите количество триграмм для вывода (по умолчанию 30): ").strip()
+                if not top_n:
+                    top_n = 30
+                    break
                 top_n = int(top_n)
-                if top_n < 1 or top_n > 100:
-                    print("❌ Пожалуйста, введите число от 1 до 100. Использую 20")
-                    top_n = 20
-        except ValueError:
-            print("❌ Пожалуйста, введите корректное число. Использую 20")
-            top_n = 20
+                if 1 <= top_n <= 100:
+                    break
+                else:
+                    print("❌ Пожалуйста, введите число от 1 до 100")
+            except ValueError:
+                print("❌ Пожалуйста, введите корректное число")
 
-        get_top_trigrams_in_document(doc_id, top_n)
+        get_document_trigrams(doc_id, top_n)
+
+    elif choice == '3':
+        while True:
+            try:
+                top_n = input(f"\n👉 Введите количество триграмм для каждого документа (по умолчанию 30): ").strip()
+                if not top_n:
+                    top_n = 30
+                    break
+                top_n = int(top_n)
+                if 1 <= top_n <= 100:
+                    break
+                else:
+                    print("❌ Пожалуйста, введите число от 1 до 100")
+            except ValueError:
+                print("❌ Пожалуйста, введите корректное число")
+
+        search_trigrams_by_frequency(doc_id=None, top_n=top_n)
+
     else:
         print("❌ Неверный выбор!")
 
 
 if __name__ == "__main__":
-    print("🔍 СИСТЕМА ПОИСКА ТРИГРАММ")
+    print("🔍 СИСТЕМА ПОИСКА ТРИГРАММ ПО ЧАСТОТЕ")
     print("=" * 60)
-    print("\nВыберите действие:")
-    print("1 - Поиск по триграмме во всех документах")
-    print("2 - Извлечение топ триграмм (по всем документам или конкретному)")
-
-    choice = input("\n👉 Ваш выбор (1/2): ").strip()
-
-    if choice == '1':
-        phrase = input("Введите фразу из 3 слов для поиска: ").strip()
-        if phrase:
-            search_trigrams(phrase)
-        else:
-            print("❌ Фраза не может быть пустой!")
-    elif choice == '2':
-        interactive_top_trigrams()
-    else:
-        print("❌ Неверный выбор! Запустите программу снова.")
+    interactive_search()

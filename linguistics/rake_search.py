@@ -1,7 +1,10 @@
 import psycopg2
 import re
-from rake_nltk import Rake
 from nltk.corpus import stopwords
+from pymorphy3 import MorphAnalyzer
+from nltk.tokenize import word_tokenize
+from collections import Counter
+import math
 import nltk
 
 try:
@@ -46,6 +49,279 @@ def get_all_documents():
         conn.close()
 
 
+def get_document_content(doc_id: int):
+    """Получает содержимое документа"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT title, content, type 
+                FROM documents 
+                WHERE id = %s
+            """, (doc_id,))
+            result = cur.fetchone()
+            if result:
+                return {
+                    'title': result[0],
+                    'content': result[1],
+                    'type': result[2]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении документа: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_all_documents_content():
+    """Получает содержимое всех документов"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, title, content, type 
+                FROM documents 
+                WHERE content IS NOT NULL AND content != ''
+                ORDER BY id
+            """)
+            documents = cur.fetchall()
+        return documents
+    except Exception as e:
+        print(f"Ошибка при получении документов: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def preprocess_text(text: str, morph=None) -> list:
+    """Предобработка текста: токенизация, очистка, лемматизация"""
+    if not text:
+        return []
+
+    # Очистка текста
+    text = re.sub(r'[^\w\s]', ' ', text.lower())
+
+    # Токенизация
+    tokens = word_tokenize(text, language='russian')
+
+    # Фильтрация стоп-слов и коротких слов
+    tokens = [t for t in tokens if t.isalpha() and t not in RUSSIAN_STOP_WORDS and len(t) > 1]
+
+    # Лемматизация
+    if morph:
+        lemmatized = []
+        for token in tokens:
+            try:
+                lemma = morph.parse(token)[0].normal_form
+                if len(lemma) > 1:
+                    lemmatized.append(lemma)
+            except:
+                lemmatized.append(token)
+        return lemmatized
+
+    return tokens
+
+
+def calculate_tf_idf(doc_id: int, top_n: int = 30):
+    """
+    Вычисляет TF*IDF для документа
+    TF (Term Frequency) - частота термина в документе
+    IDF (Inverse Document Frequency) - обратная частота документа
+    """
+    print(f"\n{'=' * 70}")
+    print(f"📊 TF*IDF ДЛЯ ДОКУМЕНТА ID: {doc_id}")
+    print(f"{'=' * 70}")
+
+    morph = MorphAnalyzer()
+
+    # Получаем информацию о документе
+    doc_info = get_document_content(doc_id)
+    if not doc_info:
+        print("❌ Документ не найден")
+        return
+
+    # Получаем все документы для расчета IDF
+    all_docs = get_all_documents_content()
+    if not all_docs:
+        print("❌ Нет документов")
+        return
+
+    print(f"\n📄 Информация о документе:")
+    print(f"   ID: {doc_id}")
+    print(f"   Название: {doc_info['title'][:150] if doc_info['title'] else 'Без названия'}")
+    print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
+    print(f"   Размер текста: {len(doc_info['content'])} символов")
+
+    # Предобработка всех документов
+    print(f"\n🔄 Обработка документов...")
+
+    doc_tokens = {}
+    all_tokens = []
+
+    for doc_id_other, title, content, doc_type in all_docs:
+        if not content:
+            continue
+        tokens = preprocess_text(content, morph)
+        doc_tokens[doc_id_other] = tokens
+        all_tokens.extend(tokens)
+
+    # Вычисляем TF для текущего документа
+    doc_tokens_current = doc_tokens.get(doc_id, [])
+    tf = Counter(doc_tokens_current)
+
+    # Вычисляем IDF для каждого слова
+    N = len(doc_tokens)  # общее количество документов
+    idf = {}
+    for token in set(all_tokens):
+        # Количество документов, содержащих слово
+        doc_freq = sum(1 for tokens in doc_tokens.values() if token in tokens)
+        if doc_freq > 0:
+            idf[token] = math.log(N / doc_freq)
+        else:
+            idf[token] = 0
+
+    # Вычисляем TF*IDF
+    tf_idf_scores = {}
+    for token, tf_value in tf.items():
+        if token in idf:
+            tf_idf_scores[token] = tf_value * idf[token]
+
+    # Сортируем по убыванию
+    sorted_scores = sorted(tf_idf_scores.items(), key=lambda x: x[1], reverse=True)
+
+    print(f"\n📊 ТОП-{min(top_n, len(sorted_scores))} КЛЮЧЕВЫХ СЛОВ ПО TF*IDF:")
+    print(f"{'─' * 70}")
+
+    for i, (token, score) in enumerate(sorted_scores[:top_n], 1):
+        # Находим контекст для слова
+        contexts = []
+        text_lower = doc_info['content'].lower()
+        pos = 0
+        while len(contexts) < 2:
+            found = text_lower.find(token, pos)
+            if found == -1:
+                break
+            start = max(0, found - 50)
+            end = min(len(doc_info['content']), found + len(token) + 50)
+            contexts.append(doc_info['content'][start:end].replace('\n', ' '))
+            pos = found + 1
+
+        print(f"\n{i:2d}. \"{token}\"")
+        print(f"    TF*IDF: {score:.4f}")
+        print(f"    TF: {tf[token]}, IDF: {idf[token]:.4f}")
+        if contexts:
+            ctx_clean = re.sub(r'\s+', ' ', contexts[0])
+            print(f"    Контекст: ...{ctx_clean[:120]}...")
+
+    # Статистика
+    print(f"\n📈 СТАТИСТИКА:")
+    print(f"   Всего уникальных слов в документе: {len(tf)}")
+    print(f"   Всего слов в документе: {len(doc_tokens_current)}")
+    print(f"   Всего документов в корпусе: {N}")
+
+
+def calculate_tf_ictf(doc_id: int, top_n: int = 30):
+    """
+    Вычисляет TF*ICTF для документа
+    TF (Term Frequency) - частота термина в документе
+    ICTF (Inverse Collection Term Frequency) - обратная частота термина в коллекции
+    """
+    print(f"\n{'=' * 70}")
+    print(f"📊 TF*ICTF ДЛЯ ДОКУМЕНТА ID: {doc_id}")
+    print(f"{'=' * 70}")
+
+    morph = MorphAnalyzer()
+
+    # Получаем информацию о документе
+    doc_info = get_document_content(doc_id)
+    if not doc_info:
+        print("❌ Документ не найден")
+        return
+
+    # Получаем все документы для расчета ICTF
+    all_docs = get_all_documents_content()
+    if not all_docs:
+        print("❌ Нет документов")
+        return
+
+    print(f"\n📄 Информация о документе:")
+    print(f"   ID: {doc_id}")
+    print(f"   Название: {doc_info['title'][:150] if doc_info['title'] else 'Без названия'}")
+    print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
+    print(f"   Размер текста: {len(doc_info['content'])} символов")
+
+    # Предобработка всех документов
+    print(f"\n🔄 Обработка документов...")
+
+    doc_tokens = {}
+    all_tokens = []
+
+    for doc_id_other, title, content, doc_type in all_docs:
+        if not content:
+            continue
+        tokens = preprocess_text(content, morph)
+        doc_tokens[doc_id_other] = tokens
+        all_tokens.extend(tokens)
+
+    # Общая частота всех слов в коллекции
+    total_freq = Counter(all_tokens)
+
+    # Вычисляем TF для текущего документа
+    doc_tokens_current = doc_tokens.get(doc_id, [])
+    tf = Counter(doc_tokens_current)
+
+    # Вычисляем ICTF для каждого слова
+    total_tokens = len(all_tokens)
+    ictf = {}
+    for token in set(all_tokens):
+        if total_tokens > 0 and total_freq[token] > 0:
+            ictf[token] = math.log(total_tokens / total_freq[token])
+        else:
+            ictf[token] = 0
+
+    # Вычисляем TF*ICTF
+    tf_ictf_scores = {}
+    for token, tf_value in tf.items():
+        if token in ictf:
+            tf_ictf_scores[token] = tf_value * ictf[token]
+
+    # Сортируем по убыванию
+    sorted_scores = sorted(tf_ictf_scores.items(), key=lambda x: x[1], reverse=True)
+
+    print(f"\n📊 ТОП-{min(top_n, len(sorted_scores))} КЛЮЧЕВЫХ СЛОВ ПО TF*ICTF:")
+    print(f"{'─' * 70}")
+
+    for i, (token, score) in enumerate(sorted_scores[:top_n], 1):
+        # Находим контекст для слова
+        contexts = []
+        text_lower = doc_info['content'].lower()
+        pos = 0
+        while len(contexts) < 2:
+            found = text_lower.find(token, pos)
+            if found == -1:
+                break
+            start = max(0, found - 50)
+            end = min(len(doc_info['content']), found + len(token) + 50)
+            contexts.append(doc_info['content'][start:end].replace('\n', ' '))
+            pos = found + 1
+
+        print(f"\n{i:2d}. \"{token}\"")
+        print(f"    TF*ICTF: {score:.4f}")
+        print(f"    TF: {tf[token]}, ICTF: {ictf[token]:.4f}")
+        print(f"    Частота в коллекции: {total_freq[token]}")
+        if contexts:
+            ctx_clean = re.sub(r'\s+', ' ', contexts[0])
+            print(f"    Контекст: ...{ctx_clean[:120]}...")
+
+    # Статистика
+    print(f"\n📈 СТАТИСТИКА:")
+    print(f"   Всего уникальных слов в документе: {len(tf)}")
+    print(f"   Всего слов в документе: {len(doc_tokens_current)}")
+    print(f"   Всего слов в коллекции: {total_tokens}")
+    print(f"   Всего уникальных слов в коллекции: {len(total_freq)}")
+
+
 def show_documents_list():
     """Показывает список всех документов для выбора"""
     documents = get_all_documents()
@@ -54,11 +330,11 @@ def show_documents_list():
         print("❌ Нет доступных документов")
         return None
 
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 70}")
     print("📚 СПИСОК ДОСТУПНЫХ ДОКУМЕНТОВ")
-    print(f"{'=' * 60}")
+    print(f"{'=' * 70}")
     print(f"\n{'ID':<6} {'Тип':<12} {'Название'}")
-    print(f"{'─' * 60}")
+    print(f"{'─' * 70}")
 
     for doc_id, title, doc_type in documents:
         title_short = title[:50] if title else "Без названия"
@@ -68,147 +344,21 @@ def show_documents_list():
     return documents
 
 
-def search_rake_keywords(search_phrase: str, limit: int = 20):
-    """Поиск ключевых слов и словосочетаний методом RAKE"""
+def interactive_search():
+    """Интерактивный режим для выбора метрики и документа"""
     print(f"\n{'=' * 60}")
-    print(f"🔍 ПОИСК ПО КЛЮЧЕВЫМ СЛОВАМ (RAKE): '{search_phrase}'")
+    print("🔍 ПОИСК КЛЮЧЕВЫХ СЛОВ ПО TF*IDF И TF*ICTF")
     print(f"{'=' * 60}")
 
-    conn = connect_db()
+    print("\nВыберите метрику:")
+    print("1 - TF*IDF (Term Frequency - Inverse Document Frequency)")
+    print("2 - TF*ICTF (Term Frequency - Inverse Collection Term Frequency)")
 
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, title, content 
-                FROM documents 
-                WHERE content IS NOT NULL AND content != ''
-            """)
-            documents = cur.fetchall()
+    metric_choice = input("\n👉 Ваш выбор (1/2): ").strip()
 
-        search_phrase_lower = search_phrase.lower().strip()
-        results = []
-
-        for doc_id, title, content in documents:
-            if not content:
-                continue
-
-            # Очищаем текст
-            cleaned_text = re.sub(r'[^\w\s]', ' ', content.lower())
-
-            # Проверяем наличие фразы
-            if search_phrase_lower not in cleaned_text:
-                continue
-
-            # Подсчет частоты
-            freq = cleaned_text.count(search_phrase_lower)
-
-            # Находим контексты
-            contexts = []
-            pos = 0
-            text_lower = content.lower()
-            while len(contexts) < 3:
-                found = text_lower.find(search_phrase_lower, pos)
-                if found == -1:
-                    break
-                start = max(0, found - 60)
-                end = min(len(content), found + len(search_phrase) + 60)
-                contexts.append(content[start:end].replace('\n', ' '))
-                pos = found + 1
-
-            results.append({
-                'id': doc_id,
-                'title': title[:100] if title else "Без названия",
-                'frequency': freq,
-                'contexts': contexts
-            })
-
-        results.sort(key=lambda x: x['frequency'], reverse=True)
-
-        print(f"\nНайдено документов: {len(results[:limit])}")
-        for r in results[:limit]:
-            print(f"\n📄 Документ ID: {r['id']}")
-            print(f"   Название: {r['title']}")
-            print(f"   Частота вхождения: {r['frequency']}")
-            for i, ctx in enumerate(r['contexts'][:2]):
-                ctx_clean = re.sub(r'\s+', ' ', ctx)
-                print(f"   Контекст {i + 1}: ...{ctx_clean[:150]}...")
-
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    finally:
-        conn.close()
-
-
-def get_rake_keywords_for_document(doc_id: int, top_n: int = 20):
-    """Извлекает ключевые слова RAKE для конкретного документа"""
-    print(f"\n{'=' * 60}")
-    print(f"🔑 КЛЮЧЕВЫЕ СЛОВА ДЛЯ ДОКУМЕНТА ID: {doc_id}")
-    print(f"{'=' * 60}")
-
-    conn = connect_db()
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title, content, type FROM documents WHERE id = %s", (doc_id,))
-            result = cur.fetchone()
-            if not result:
-                print("❌ Документ не найден")
-                return
-
-            doc_id, title, content, doc_type = result
-            print(f"\n📄 Информация о документе:")
-            print(f"   ID: {doc_id}")
-            print(f"   Название: {title[:150] if title else 'Без названия'}")
-            print(f"   Тип файла: {doc_type if doc_type else 'Не указан'}")
-            print(f"   Размер текста: {len(content)} символов")
-
-            # Очищаем текст
-            cleaned_text = re.sub(r'[^\w\s]', ' ', content.lower())
-
-            # Создаем RAKE экстрактор
-            rake = Rake(language='russian', stopwords=RUSSIAN_STOP_WORDS, min_length=2, max_length=4)
-            rake.extract_keywords_from_text(cleaned_text)
-
-            ranked_phrases = rake.get_ranked_phrases_with_scores()
-
-            print(f"\n🏆 ТОП-{top_n} КЛЮЧЕВЫХ СЛОВ И СЛОВОСОЧЕТАНИЙ:")
-            print(f"{'─' * 60}")
-
-            valid_phrases = []
-            for score, phrase in ranked_phrases:
-                if len(phrase.split()) <= 4:
-                    valid_phrases.append((score, phrase))
-
-            for i, (score, phrase) in enumerate(valid_phrases[:top_n], 1):
-                # Находим контекст для ключевой фразы
-                contexts = []
-                text_lower = content.lower()
-                pos = 0
-                while len(contexts) < 2:
-                    found = text_lower.find(phrase, pos)
-                    if found == -1:
-                        break
-                    start = max(0, found - 50)
-                    end = min(len(content), found + len(phrase) + 50)
-                    contexts.append(content[start:end].replace('\n', ' '))
-                    pos = found + 1
-
-                print(f"\n{i:2d}. \"{phrase}\"")
-                print(f"    Релевантность: {score:.3f}")
-                if contexts:
-                    print(f"    Пример контекста: ...{contexts[0][:120]}...")
-
-    except Exception as e:
-        print(f"Ошибка: {e}")
-    finally:
-        conn.close()
-
-
-def interactive_rake_keywords():
-    """Интерактивный режим для выбора документа и вывода ключевых слов"""
-    print(f"\n{'=' * 60}")
-    print("🔑 ИЗВЛЕЧЕНИЕ КЛЮЧЕВЫХ СЛОВ RAKE ПО ДОКУМЕНТУ")
-    print(f"{'=' * 60}")
+    if metric_choice not in ['1', '2']:
+        print("❌ Неверный выбор!")
+        return
 
     # Показываем список документов
     documents = show_documents_list()
@@ -222,7 +372,6 @@ def interactive_rake_keywords():
             doc_id = input(f"\n👉 Введите ID документа: ").strip()
             doc_id = int(doc_id)
 
-            # Проверяем существует ли документ
             doc_exists = any(doc[0] == doc_id for doc in documents)
             if doc_exists:
                 break
@@ -237,9 +386,9 @@ def interactive_rake_keywords():
     # Ввод количества ключевых слов
     while True:
         try:
-            top_n = input("\n👉 Введите количество ключевых слов для вывода (по умолчанию 20): ").strip()
+            top_n = input("\n👉 Введите количество ключевых слов для вывода (по умолчанию 30): ").strip()
             if not top_n:
-                top_n = 20
+                top_n = 30
                 break
             top_n = int(top_n)
             if 1 <= top_n <= 100:
@@ -249,26 +398,162 @@ def interactive_rake_keywords():
         except ValueError:
             print("❌ Пожалуйста, введите корректное число")
 
-    # Выводим ключевые слова
-    get_rake_keywords_for_document(doc_id, top_n)
+    # Вычисляем выбранную метрику
+    if metric_choice == '1':
+        calculate_tf_idf(doc_id, top_n)
+    else:
+        calculate_tf_ictf(doc_id, top_n)
+
+
+def compare_metrics(doc_id: int, top_n: int = 20):
+    """Сравнивает результаты TF*IDF и TF*ICTF для одного документа"""
+    print(f"\n{'=' * 70}")
+    print(f"📊 СРАВНЕНИЕ TF*IDF И TF*ICTF ДЛЯ ДОКУМЕНТА ID: {doc_id}")
+    print(f"{'=' * 70}")
+
+    morph = MorphAnalyzer()
+
+    # Получаем информацию о документе
+    doc_info = get_document_content(doc_id)
+    if not doc_info:
+        print("❌ Документ не найден")
+        return
+
+    # Получаем все документы
+    all_docs = get_all_documents_content()
+    if not all_docs:
+        print("❌ Нет документов")
+        return
+
+    print(f"\n📄 Информация о документе:")
+    print(f"   ID: {doc_id}")
+    print(f"   Название: {doc_info['title'][:150] if doc_info['title'] else 'Без названия'}")
+    print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
+
+    # Предобработка всех документов
+    print(f"\n🔄 Обработка документов...")
+
+    doc_tokens = {}
+    all_tokens = []
+
+    for doc_id_other, title, content, doc_type in all_docs:
+        if not content:
+            continue
+        tokens = preprocess_text(content, morph)
+        doc_tokens[doc_id_other] = tokens
+        all_tokens.extend(tokens)
+
+    # Вычисляем TF для текущего документа
+    doc_tokens_current = doc_tokens.get(doc_id, [])
+    tf = Counter(doc_tokens_current)
+
+    # Вычисляем IDF
+    N = len(doc_tokens)
+    idf = {}
+    for token in set(all_tokens):
+        doc_freq = sum(1 for tokens in doc_tokens.values() if token in tokens)
+        if doc_freq > 0:
+            idf[token] = math.log(N / doc_freq)
+        else:
+            idf[token] = 0
+
+    # Вычисляем ICTF
+    total_freq = Counter(all_tokens)
+    total_tokens = len(all_tokens)
+    ictf = {}
+    for token in set(all_tokens):
+        if total_tokens > 0 and total_freq[token] > 0:
+            ictf[token] = math.log(total_tokens / total_freq[token])
+        else:
+            ictf[token] = 0
+
+    # Вычисляем TF*IDF и TF*ICTF
+    tf_idf_scores = {}
+    tf_ictf_scores = {}
+    for token, tf_value in tf.items():
+        if token in idf:
+            tf_idf_scores[token] = tf_value * idf[token]
+        if token in ictf:
+            tf_ictf_scores[token] = tf_value * ictf[token]
+
+    # Сортируем
+    tf_idf_sorted = sorted(tf_idf_scores.items(), key=lambda x: x[1], reverse=True)
+    tf_ictf_sorted = sorted(tf_ictf_scores.items(), key=lambda x: x[1], reverse=True)
+
+    print(f"\n📊 СРАВНЕНИЕ ТОП-{top_n} КЛЮЧЕВЫХ СЛОВ:")
+    print(f"{'─' * 100}")
+    print(f"{'#':<4} {'TF*IDF':<25} {'Score':<12} {'TF*ICTF':<25} {'Score':<12}")
+    print(f"{'─' * 100}")
+
+    for i in range(min(top_n, len(tf_idf_sorted), len(tf_ictf_sorted))):
+        tf_idf_word, tf_idf_score = tf_idf_sorted[i] if i < len(tf_idf_sorted) else ("-", 0)
+        tf_ictf_word, tf_ictf_score = tf_ictf_sorted[i] if i < len(tf_ictf_sorted) else ("-", 0)
+
+        print(f"{i + 1:<4} {tf_idf_word:<25} {tf_idf_score:<12.4f} {tf_ictf_word:<25} {tf_ictf_score:<12.4f}")
+
+    # Общие слова в топе
+    tf_idf_top = set([word for word, _ in tf_idf_sorted[:top_n]])
+    tf_ictf_top = set([word for word, _ in tf_ictf_sorted[:top_n]])
+    common = tf_idf_top & tf_ictf_top
+
+    print(f"\n📈 СТАТИСТИКА СРАВНЕНИЯ:")
+    print(f"   Пересечение топ-{top_n}: {len(common)} слов")
+    print(f"   Уникальные для TF*IDF: {len(tf_idf_top - tf_ictf_top)} слов")
+    print(f"   Уникальные для TF*ICTF: {len(tf_ictf_top - tf_idf_top)} слов")
+
+    if common:
+        print(f"\n   Общие слова в топ-{top_n}:")
+        for word in sorted(common)[:10]:
+            print(f"     - {word}")
 
 
 if __name__ == "__main__":
-    print("🔍 СИСТЕМА ПОИСКА RAKE (КЛЮЧЕВЫЕ СЛОВА И ФРАЗЫ)")
+    print("🔍 СИСТЕМА ПОИСКА КЛЮЧЕВЫХ СЛОВ (TF*IDF и TF*ICTF)")
     print("=" * 60)
     print("\nВыберите действие:")
-    print("1 - Поиск по ключевой фразе во всех документах")
-    print("2 - Извлечение ключевых слов из конкретного документа")
+    print("1 - Вычислить ключевые слова для документа по одной метрике")
+    print("2 - Сравнить TF*IDF и TF*ICTF для одного документа")
 
     choice = input("\n👉 Ваш выбор (1/2): ").strip()
 
     if choice == '1':
-        phrase = input("Введите ключевую фразу для поиска: ").strip()
-        if phrase:
-            search_rake_keywords(phrase)
-        else:
-            print("❌ Фраза не может быть пустой!")
+        interactive_search()
     elif choice == '2':
-        interactive_rake_keywords()
+        # Показываем список документов
+        documents = show_documents_list()
+        if not documents:
+            exit()
+
+        while True:
+            try:
+                doc_id = input(f"\n👉 Введите ID документа: ").strip()
+                doc_id = int(doc_id)
+
+                doc_exists = any(doc[0] == doc_id for doc in documents)
+                if doc_exists:
+                    break
+                else:
+                    print(f"❌ Документ с ID {doc_id} не найден. Попробуйте снова.")
+            except ValueError:
+                print("❌ Пожалуйста, введите корректный числовой ID")
+            except KeyboardInterrupt:
+                print("\n👋 Отмена")
+                exit()
+
+        while True:
+            try:
+                top_n = input("\n👉 Введите количество ключевых слов для сравнения (по умолчанию 20): ").strip()
+                if not top_n:
+                    top_n = 20
+                    break
+                top_n = int(top_n)
+                if 1 <= top_n <= 100:
+                    break
+                else:
+                    print("❌ Пожалуйста, введите число от 1 до 100")
+            except ValueError:
+                print("❌ Пожалуйста, введите корректное число")
+
+        compare_metrics(doc_id, top_n)
     else:
         print("❌ Неверный выбор! Запустите программу снова.")
