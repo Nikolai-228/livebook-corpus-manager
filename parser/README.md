@@ -1,7 +1,11 @@
+Вот обновлённый `README.md` для твоего модуля парсинга:
+
 ```markdown
 # Модуль парсинга Google Drive
 
 Модуль для автоматического извлечения, обработки и загрузки в базу данных PostgreSQL документов и изображений из Google Drive. Входит в состав проекта **«Живая книга ИМИ — Корпусный менеджер»**.
+
+---
 
 ## 📋 Назначение
 
@@ -10,65 +14,115 @@
 - Извлечение текста из документов различных форматов
 - Распознавание текста в PDF-файлах (с использованием PyMuPDF)
 - Извлечение изображений из HTML, DOCX и Google Docs
-- Извлечение дат из текста документов
 - Сохранение данных в структурированную базу данных PostgreSQL
+- **Два режима работы:** полная перезапись или продолжение с того же места
+
+---
 
 ## 📁 Структура модуля
 
 ```
 parser/
 
-├── config.py                # Конфигурация: API-ключи, разделы, БД
+├── config.py                          # Конфигурация: API-ключи, разделы, БД
 
-├── db_utils.py              # Утилиты для работы с PostgreSQL
+├── db_utils.py                        # Утилиты для работы с PostgreSQL
 
-├── text_extractor.py        # Извлечение текста и изображений из файлов
+├── text_extractor.py                  # Извлечение текста и изображений из файлов
 
-├── parse_all_chapters.py    # Основной скрипт запуска парсинга
+├── parse_all_chapters_clean.py        # Полная перезапись БД
+
+├── parse_all_chapters_continue.py     # Продолжение (только новые файлы)
 
 └── livebook-parser-265c1e8112e9.json  # Ключ сервисного аккаунта Google
 ```
+
+---
 
 ## 🚀 Быстрый старт
 
 ### 1. Установка зависимостей
 
 ```bash
-pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4 psycopg2-binary PyMuPDF kreuzberg requests
+pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4 psycopg2-binary PyMuPDF requests
 ```
 
-### 2. Настройка PostgreSQL
+> **Важно:** `kreuzberg` больше не используется.
 
-```sql
-CREATE DATABASE test_book;
--- или выполните init_db.sql из backend/migrations/
-```
+### 2. Создание базы данных
 
-### 3. Настройка конфигурации
-
-Отредактируйте `config.py`:
-
-```python
-# Путь к файлу ключа сервисного аккаунта
-SERVICE_ACCOUNT_FILE = r'путь\к\вашему\ключу.json'
-
-# Строка подключения к БД
-DATABASE_DSN = "postgresql://user:password@localhost:5432/test_book"
-
-# Список разделов (имя + ID папки на Google Drive)
-CHAPTERS = [
-    {"name": "Название раздела", "folder_id": "ID_папки"},
-    # ...
-]
-```
-
-### 4. Запуск
+Выполни `schema.sql` в своей БД (файл находится в модуле create_db):
 
 ```bash
-python parse_all_chapters.py
+psql -U postgres -c "CREATE DATABASE livebook_corpus;"
+psql -U postgres -d livebook_corpus -f schema.sql
 ```
 
-## 🔧 Компоненты
+Или создай вручную для дальнейшего автоматического создания всех таблиц, 
+связей индексов и тд (не рекомендовано):
+
+```sql
+CREATE DATABASE livebook_corpus;
+```
+
+### 3. Настройка подключения к БД
+
+Отредактируй `config.py`:
+
+```python
+# PostgreSQL
+DATABASE_DSN = "postgresql://postgres:password@localhost:5432/livebook_corpus"
+```
+
+Формат: `postgresql://user:password@host:port/database`
+
+### 4. Настройка Google Drive
+
+## 🔐 Создание ключа сервисного аккаунта Google
+
+1. Перейди в [Google Cloud Console](https://console.cloud.google.com/)
+2. Создай новый проект или выбери существующий
+3. Включи **Google Drive API**
+4. Перейди в **IAM & Admin → Service Accounts**
+5. Нажми **+ CREATE SERVICE ACCOUNT**
+6. Укажи имя → **CREATE AND CONTINUE** → **DONE**
+7. Нажми на созданный аккаунт → **KEYS** → **ADD KEY** → **Create New Key**
+8. Выбери **JSON** → ключ скачается автоматически
+9. Перемести файл в папку `parser/`
+10. В `config.py` укажи путь к файлу:
+
+```python
+SERVICE_ACCOUNT_FILE = r'путь\к\папке\parser\название_ключа.json'
+```
+Или запроси файл с ключом у автора модуля, не рекомендовано размещать 
+ключ API в открытых источниках.
+
+### 5. Запуск
+
+**Полная перезапись** (удаляет все старые данные):
+
+```bash
+python parse_all_chapters_clean.py
+```
+
+**Продолжение** (добавляет только новые файлы):
+
+```bash
+python parse_all_chapters_continue.py
+```
+
+---
+
+## 🔧 Два режима работы
+
+| Режим | Скрипт | Что делает |
+|-------|--------|------------|
+| **Полная перезапись** | `parse_all_chapters_clean.py` | 🗑️ Удаляет все данные из `chapters`, `folders`, `documents`, `media` и заполняет заново |
+| **Продолжение** | `parse_all_chapters_continue.py` | ➕ Добавляет только новые файлы, пропускает уже существующие (по `url`) |
+
+---
+
+## ⚙️ Конфигурация
 
 ### `config.py`
 
@@ -76,40 +130,41 @@ python parse_all_chapters.py
 |------------|------------|
 | `SERVICE_ACCOUNT_FILE` | Путь к JSON-ключу сервисного аккаунта Google |
 | `CHAPTERS` | Список словарей с названиями и ID папок разделов |
-| `DATABASE_DSN` | Строка подключения в формате PostgreSQL |
-| `CHANDRA_METHOD` | Метод OCR (зарезервировано для будущего использования) |
-| `CHANDRA_TEMP_DIR` | Временная директория для OCR |
+| `DATABASE_DSN` | Строка подключения к PostgreSQL |
 
-### `db_utils.py`
+Пример `CHAPTERS`:
 
-| Функция | Назначение |
-|---------|-------------|
-| `get_db_connection()` | Создаёт подключение к PostgreSQL |
-| `get_or_create_chapter_by_name()` | Возвращает ID раздела (создаёт при отсутствии) |
-| `get_or_create_folder()` | Создаёт или возвращает ID папки с иерархией |
-| `save_document()` | Сохраняет документ с метаданными |
-| `save_media()` | Сохраняет медиафайл (изображение) |
+```python
+CHAPTERS = [
+    {"name": "Выпуск 1962", "folder_id": "0B8SHLgKhSzzVQkJlTmlZTTA3VlU"},
+    {"name": "Стройотряды", "folder_id": "0B7oIjQ46Neu2b0poX0JQVE9iZ1E"},
+    # ...
+]
+```
 
-### `text_extractor.py`
+---
 
-| Функция | Назначение |
-|---------|-------------|
-| `extract_text_from_pdf()` | Извлечение текста из PDF с очисткой (номера страниц, ссылки, сноски) |
-| `extract_text_from_html()` | Парсинг HTML через BeautifulSoup |
-| `extract_text_and_images_from_google_doc()` | Экспорт Google Docs в HTML с последующим извлечением |
-| `extract_images_from_docx()` | Извлечение изображений из DOCX-архива |
-| `extract_date_from_text()` | Поиск даты в тексте по нескольким паттернам |
-| `clean_text_from_urls()` | Удаление ссылок и мусорных конструкций |
-| `is_image()` | Проверка MIME-типа на принадлежность к изображениям |
+## 🧠 Особенности обработки
 
-### `parse_all_chapters.py`
+### Текст
 
-Основной скрипт, выполняющий:
-1. Авторизацию в Google Drive API через сервисный аккаунт
-2. Последовательный парсинг всех разделов из `CHAPTERS`
-3. Рекурсивный обход папок и создание их в БД
-4. Обработку файлов (документы сохраняются, изображения — опционально)
-5. Вывод статистики по разделам
+| Формат | Метод |
+|--------|-------|
+| **PDF** | PyMuPDF (`fitz`) с очисткой от номеров страниц, сносок, ссылок |
+| **DOCX** | Распаковка `zip` и чтение `word/document.xml` |
+| **Google Docs** | Экспорт в HTML → BeautifulSoup → очистка |
+| **TXT** | Прямое чтение |
+| **DOC (старый)** | Чтение как plain text |
+
+### Изображения
+
+| Источник | Метод |
+|----------|-------|
+| HTML / Google Docs | Извлечение из `data:` URI и внешних URL |
+| DOCX | Распаковка `word/media/` |
+| Отдельные файлы | Скачивание через Drive API |
+
+---
 
 ## 📊 Схема данных
 
@@ -118,119 +173,32 @@ python parse_all_chapters.py
 ```
 chapters (id, name)
     ├── folders (id, name, parent_folder_id, full_path, chapter_id)
-    ├── documents (id, title, type, chapter_id, folder_id, content, url, creation_date)
+    ├── documents (id, title, type, chapter_id, folder_id, content, url)
     └── media (id, chapter_id, folder_id, document_id, name, media)
 ```
 
-- `chapters` — верхнеуровневые разделы («Выпуск 1962», «Стройотряды» и т.д.)
-- `folders` — иерархия папок внутри разделов
-- `documents` — текстовые документы (привязаны к разделу и/или папке)
-- `media` — изображения (могут быть привязаны к документу или папке)
+---
 
-## 🧠 Особенности обработки
-
-### Текст
-
-| Формат | Метод обработки |
-|--------|-----------------|
-| **PDF** | PyMuPDF с постобработкой — удаление номеров страниц, сносок, ссылок |
-| **DOCX** | Извлечение через `kreuzberg` |
-| **Google Docs** | Экспорт в HTML → BeautifulSoup → очистка |
-| **HTML/TXT** | Прямое извлечение |
-
-### Изображения
-
-| Источник | Метод извлечения |
-|----------|------------------|
-| HTML | Извлечение из `data:` URI и внешних URL |
-| DOCX | Распаковка архива `word/media/` |
-| Google Docs | Извлечение из экспортированного HTML |
-| Отдельные файлы | Скачивание через Drive API (опционально) |
-
-### Даты
-
-Автоматическое извлечение из текста по шаблонам:
-
-```python
-# Поддерживаемые форматы
-"дата: 12.05.2023"
-"опубликовано 2024-01-15"
-"создано 15/05/2024"
-"2024"  # будет преобразовано в 2024-01-01
-```
-
-## 📝 Пример вывода
-
-```
-🚀 ЗАПУСК ПАРСЕРА ВСЕХ РАЗДЕЛОВ GOOGLE DRIVE
-🔐 Авторизация через Service Account...
-✅ Авторизация успешна
-
-💾 Подключение к PostgreSQL...
-✅ Подключение установлено
-
-📚 РАЗДЕЛ 1/12: Выпуск 1962
-📁 ID папки: 0B8SHLgKhSzzVQkJlTmlZTTA3VlU
-✅ ID раздела в БД: 1
-
-📁 Папка: Выпуск 1962 (раздел ID: 1)
-  📄 Документ: статья_о_выпуске.pdf
-    📑 PDF (Chandra OCR): статья_о_выпуске.pdf
-    📅 Найдена дата: 1962-06-15
-    ✅ Документ сохранён (ID: 42)
-  📄 Документ: воспоминания.docx
-    📝 DOCX: воспоминания.docx
-    ✅ Документ сохранён (ID: 43)
-  📂 Вход в папку: Фотографии
-    🖼️ Изображение (файл): выпускники.jpg
-      ✅ Изображение сохранено: выпускники.jpg
-
-📊 ИТОГОВАЯ СТАТИСТИКА ПО ВСЕМ РАЗДЕЛАМ
-   📁 Всего папок: 156
-   📄 Всего документов: 423
-   🖼️ Всего изображений: 891
-
-📊 СТАТИСТИКА ПО РАЗДЕЛАМ:
-   📚 Выпуск 1962: 45 документов, 120 изображений
-   📚 Стройотряды: 38 документов, 95 изображений
-   📚 Спортлагерь: 29 документов, 67 изображений
-   ...
-
-✅ ПАРСИНГ ВСЕХ РАЗДЕЛОВ ЗАВЕРШЁН!
-```
 
 ## ⚙️ Требования
 
 - Python 3.8+
 - PostgreSQL 12+
 - Сервисный аккаунт Google с включённым Drive API
-- Доступ сервисного аккаунта к целевым папкам на Google Drive
 
-## 🔧 Настройка Google Service Account
-
-1. Перейдите в [Google Cloud Console](https://console.cloud.google.com/)
-2. Создайте новый проект или выберите существующий
-3. Включите **Google Drive API**
-4. Перейдите в **IAM & Admin → Service Accounts**
-5. Создайте новый сервисный аккаунт
-6. Скачайте JSON-ключ
-7. Предоставьте сервисному аккаунту доступ к папкам (скопируйте email аккаунта и добавьте в права доступа папок на Google Drive)
+---
 
 ## 🐛 Возможные проблемы и решения
 
 | Проблема | Решение |
 |----------|---------|
-| `File not found` при указании SERVICE_ACCOUNT_FILE | Проверьте абсолютный путь к файлу ключа |
-| Ошибка авторизации 403 | Убедитесь, что сервисный аккаунт имеет доступ к целевым папкам |
-| `psycopg2` не устанавливается | Используйте `pip install psycopg2-binary` или установите `libpq-dev` |
-| Медленный парсинг больших PDF | Добавьте ограничение на размер файлов или используйте асинхронную загрузку |
-| Ошибка `kreuzberg` на Windows | Установите дополнительные системные зависимости или используйте альтернативные методы извлечения |
-
-## 📄 Лицензия
-
-Учебный проект. Не для коммерческого использования.
+| `No module named 'tools'` | Удали `kreuzberg`: `pip uninstall kreuzberg` |
+| `module 'fitz' has no attribute 'open'` | Установи PyMuPDF: `pip install PyMuPDF` |
+| Ошибка подключения к БД | Проверь `DATABASE_DSN` в `config.py` |
+| Сервисный аккаунт не имеет доступа | Добавь email сервисного аккаунта в права папки на Google Drive |
 
 ---
 
-**Автор:** Николай  
+**Автор модуля:** Дресвянников Николай (nikolaj192005@mail.ru) 
 **Проект:** [livebook-corpus-manager](https://github.com/Nikolai-228/livebook-corpus-manager)
+```

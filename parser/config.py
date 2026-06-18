@@ -3,7 +3,7 @@
 import os
 
 # Google Drive Service Account
-SERVICE_ACCOUNT_FILE = r'C:\Users\HUAWEI\Desktop\practica\API\livebook-parser-265c1e8112e9.json'
+SERVICE_ACCOUNT_FILE = r'D:\practica\livebook-corpus-manager\parser\livebook-parser-265c1e8112e9.json'
 
 # Список всех разделов с их ID и названиями
 CHAPTERS = [
@@ -22,7 +22,7 @@ CHAPTERS = [
 ]
 
 # PostgreSQL
-DATABASE_DSN = "postgresql://postgres:228228@localhost:5432/livebook_corpus"
+DATABASE_DSN = "postgresql://postgres:228228@localhost:5432/test_book"
 
 # Chandra OCR настройки
 CHANDRA_METHOD = "hf"
