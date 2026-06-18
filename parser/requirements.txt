@@ -1,5 +1,5 @@
 # backend and parser
-fastapi
+
 uvicorn
 psycopg2-binary
 sqlalchemy
