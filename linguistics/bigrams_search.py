@@ -112,9 +112,43 @@ def find_lemmatized_bigram_contexts(lemmatized_text: str, word1: str, word2: str
     return contexts
 
 
-def extract_bigrams_from_lemmatized(lemmatized_text: str, top_n: int = 50) -> list:
+def extract_bigrams_by_frequency(lemmatized_text: str, top_n: int = 50) -> list:
     """
-    Извлекает биграммы из лемматизированного текста с использованием Likelihood Ratio
+    Извлекает биграммы из лемматизированного текста по частоте встречаемости
+    """
+    if not lemmatized_text:
+        return []
+
+    # Разбиваем лемматизированный текст на леммы
+    tokens = lemmatized_text.lower().split()
+
+    # Фильтруем стоп-слова и слишком короткие слова
+    tokens = [t for t in tokens if t not in RUSSIAN_STOP_WORDS and len(t) > 1]
+
+    if len(tokens) < 2:
+        return []
+
+    # Создаем finder для биграмм
+    finder = BigramCollocationFinder.from_words(tokens)
+
+    # Фильтруем редкие биграммы (встречаются менее 2 раз)
+    finder.apply_freq_filter(2)
+
+    # Получаем топ-N биграмм по частоте
+    bigrams_freq = finder.nbest(BigramAssocMeasures.raw_freq, top_n)
+
+    # Формируем результат: (биграмма, частота)
+    result = []
+    for bigram in bigrams_freq:
+        freq = finder.ngram_fd[bigram]
+        result.append((bigram, freq))
+
+    return result
+
+
+def extract_collocations_by_likelihood(lemmatized_text: str, top_n: int = 50) -> list:
+    """
+    Извлекает коллокации из лемматизированного текста по метрике Likelihood Ratio
     """
     if not lemmatized_text:
         return []
@@ -147,9 +181,9 @@ def extract_bigrams_from_lemmatized(lemmatized_text: str, top_n: int = 50) -> li
 
 
 def search_bigrams_by_word(search_word: str, top_n: int = 30):
-    """Поиск биграмм, содержащих заданное слово с использованием Likelihood Ratio"""
+    """Поиск биграмм по частоте, содержащих заданное слово"""
     print(f"\n{'=' * 70}")
-    print(f"🔍 ПОИСК КОЛЛОКАЦИЙ ПО МЕТРИКЕ LIKELIHOOD RATIO")
+    print(f"🔍 ПОИСК БИГРАММ ПО ЧАСТОТЕ")
     print(f"{'=' * 70}")
     print(f"🔍 ПОИСК БИГРАММ, СОДЕРЖАЩИХ СЛОВО: '{search_word}'")
     print(f"{'=' * 70}")
@@ -180,20 +214,20 @@ def search_bigrams_by_word(search_word: str, top_n: int = 30):
 
         print(f"\n📄 Обработка документа: {title[:50] if title else 'Без названия'} (ID: {doc_id})")
 
-        # Извлекаем биграммы с Likelihood Ratio
-        bigrams = extract_bigrams_from_lemmatized(lemmatized_text, 100)
+        # Извлекаем биграммы по частоте
+        bigrams = extract_bigrams_by_frequency(lemmatized_text, 100)
 
         # Фильтруем биграммы, содержащие искомую лемму
         filtered_bigrams = []
-        for bigram, freq, score in bigrams:
+        for bigram, freq in bigrams:
             word1, word2 = bigram
 
             # Проверяем совпадение с леммой
             if word1 == search_lemma or word2 == search_lemma:
-                filtered_bigrams.append((bigram, freq, score))
+                filtered_bigrams.append((bigram, freq))
 
         if filtered_bigrams:
-            for bigram, freq, score in filtered_bigrams:
+            for bigram, freq in filtered_bigrams:
                 # Находим ВСЕ контексты для ТОЧНОЙ биграммы
                 contexts = find_lemmatized_bigram_contexts(
                     lemmatized_text,
@@ -208,12 +242,11 @@ def search_bigrams_by_word(search_word: str, top_n: int = 30):
                     'bigram': bigram,
                     'bigram_text': f"{bigram[0]} {bigram[1]}",
                     'frequency': freq,
-                    'likelihood_score': score,
                     'contexts': contexts
                 })
 
-    # Сортируем по Likelihood score (от большего к меньшему)
-    found_bigrams.sort(key=lambda x: x['likelihood_score'], reverse=True)
+    # Сортируем по частоте (от большего к меньшему)
+    found_bigrams.sort(key=lambda x: x['frequency'], reverse=True)
 
     print(f"\n✅ Найдено биграмм, содержащих лемму '{search_lemma}': {len(found_bigrams)}")
 
@@ -227,7 +260,6 @@ def search_bigrams_by_word(search_word: str, top_n: int = 30):
             print(f"    ID документа: {item['doc_id']}")
             print(f"    Тип: {item['type']}")
             print(f"    Частота: {item['frequency']} раз(а)")
-            print(f"    Likelihood Ratio: {item['likelihood_score']:.4f}")
             print(f"    Количество контекстов: {len(item['contexts'])}")
 
             if len(item['contexts']) == item['frequency']:
@@ -252,9 +284,9 @@ def search_bigrams_by_word(search_word: str, top_n: int = 30):
 
 
 def get_document_bigrams(doc_id: int, top_n: int = 50):
-    """Получает топ-N биграмм для конкретного документа с использованием Likelihood Ratio"""
+    """Получает топ-N биграмм по частоте для конкретного документа"""
     print(f"\n{'=' * 70}")
-    print(f"📊 КОЛЛОКАЦИИ ПО МЕТРИКЕ LIKELIHOOD RATIO")
+    print(f"📊 БИГРАММЫ ПО ЧАСТОТЕ")
     print(f"{'=' * 70}")
     print(f"📊 ТОП-{top_n} БИГРАММ В ДОКУМЕНТЕ ID: {doc_id}")
     print(f"{'=' * 70}")
@@ -277,17 +309,17 @@ def get_document_bigrams(doc_id: int, top_n: int = 50):
     print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
     print(f"   Размер лемматизированного текста: {len(lemmatized_text)} символов")
 
-    # Извлекаем биграммы с Likelihood Ratio
-    bigrams = extract_bigrams_from_lemmatized(lemmatized_text, top_n)
+    # Извлекаем биграммы по частоте
+    bigrams = extract_bigrams_by_frequency(lemmatized_text, top_n)
 
     if not bigrams:
         print(f"\n❌ Биграммы не найдены в документе")
         return
 
-    print(f"\n📊 ТОП-{len(bigrams)} КОЛЛОКАЦИЙ ПО LIKELIHOOD RATIO:")
+    print(f"\n📊 ТОП-{len(bigrams)} БИГРАММ ПО ЧАСТОТЕ:")
     print(f"{'─' * 70}")
 
-    for i, (bigram, freq, score) in enumerate(bigrams, 1):
+    for i, (bigram, freq) in enumerate(bigrams, 1):
         bigram_text = ' '.join(bigram)
 
         # Находим ВСЕ контексты для биграммы
@@ -299,7 +331,6 @@ def get_document_bigrams(doc_id: int, top_n: int = 50):
 
         print(f"\n{i:2d}. Биграмма (леммы): \"{bigram_text}\"")
         print(f"    Частота: {freq} раз(а)")
-        print(f"    Likelihood Ratio: {score:.4f}")
         print(f"    Количество контекстов: {len(contexts)}")
 
         if len(contexts) == freq:
@@ -323,12 +354,12 @@ def get_document_bigrams(doc_id: int, top_n: int = 50):
     print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
     print(f"   Всего уникальных биграмм: {len(bigrams)}")
     if bigrams:
-        print(f"   Лучшая коллокация: '{' '.join(bigrams[0][0])}' (Likelihood: {bigrams[0][2]:.4f})")
+        print(f"   Самая частотная биграмма: '{' '.join(bigrams[0][0])}' ({bigrams[0][1]} раз)")
 
 
 def search_collocations_by_likelihood(doc_id: int = None, top_n: int = 30):
     """
-    НОВАЯ ФУНКЦИЯ: Поиск коллокаций по метрике Likelihood Ratio
+    Поиск коллокаций по метрике Likelihood Ratio
 
     Параметры:
     - doc_id: ID документа (если None, то поиск по всем документам)
@@ -362,8 +393,8 @@ def search_collocations_by_likelihood(doc_id: int = None, top_n: int = 30):
         print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
         print(f"   Размер лемматизированного текста: {len(lemmatized_text)} символов")
 
-        # Извлекаем коллокации
-        collocations = extract_bigrams_from_lemmatized(lemmatized_text, top_n)
+        # Извлекаем коллокации по Likelihood Ratio
+        collocations = extract_collocations_by_likelihood(lemmatized_text, top_n)
 
         if not collocations:
             print(f"\n❌ Коллокации не найдены в документе")
@@ -426,8 +457,8 @@ def search_collocations_by_likelihood(doc_id: int = None, top_n: int = 30):
 
             print(f"\n📄 Документ: {title[:50] if title else 'Без названия'} (ID: {doc_id})")
 
-            # Извлекаем коллокации
-            collocations = extract_bigrams_from_lemmatized(lemmatized_text, top_n)
+            # Извлекаем коллокации по Likelihood Ratio
+            collocations = extract_collocations_by_likelihood(lemmatized_text, top_n)
 
             if collocations:
                 print(f"   Тип: {doc_type if doc_type else 'Не указан'}")
@@ -493,16 +524,16 @@ def show_documents_list():
 
 
 def interactive_search():
-    """Интерактивный режим для поиска коллокаций"""
+    """Интерактивный режим для поиска"""
     print(f"\n{'=' * 60}")
-    print("🔍 ПОИСК КОЛЛОКАЦИЙ (LIKELIHOOD RATIO)")
+    print("🔍 ПОИСК БИГРАММ И КОЛЛОКАЦИЙ")
     print(f"{'=' * 60}")
 
     print("\nВыберите режим работы:")
-    print("1 - Поиск биграмм, содержащих конкретное слово")
-    print("2 - Показать топ-N биграмм в конкретном документе")
-    print("3 - Показать все документы с их топ-биграммами")
-    print("4 - Поиск коллокаций по Likelihood Ratio (новый)")
+    print("1 - Поиск биграмм (по частоте), содержащих конкретное слово")
+    print("2 - Показать топ-N биграмм (по частоте) в конкретном документе")
+    print("3 - Показать все документы с их топ-биграммами (по частоте)")
+    print("4 - Поиск коллокаций по Likelihood Ratio")
 
     choice = input("\n👉 Ваш выбор (1/2/3/4): ").strip()
 
@@ -571,26 +602,26 @@ def interactive_search():
             return
 
         print(f"\n{'=' * 70}")
-        print(f"📊 ТОП-{top_n} КОЛЛОКАЦИЙ ПО LIKELIHOOD RATIO ДЛЯ ВСЕХ ДОКУМЕНТОВ")
+        print(f"📊 ТОП-{top_n} БИГРАММ ПО ЧАСТОТЕ ДЛЯ ВСЕХ ДОКУМЕНТОВ")
         print(f"{'=' * 70}")
 
         for doc_id, title, doc_type, lemmatized_text in documents:
             if not lemmatized_text:
                 continue
 
-            bigrams = extract_bigrams_from_lemmatized(lemmatized_text, top_n)
+            bigrams = extract_bigrams_by_frequency(lemmatized_text, top_n)
 
             print(f"\n📄 Документ: {title[:80] if title else 'Без названия'} (ID: {doc_id})")
             print(f"   Тип: {doc_type if doc_type else 'Не указан'}")
 
             if bigrams:
-                print(f"   Топ-{min(5, len(bigrams))} коллокаций:")
-                for i, (bigram, freq, score) in enumerate(bigrams[:5], 1):
-                    print(f"     {i}. {' '.join(bigram)} (частота: {freq}, Likelihood: {score:.4f})")
+                print(f"   Топ-{min(5, len(bigrams))} биграмм:")
+                for i, (bigram, freq) in enumerate(bigrams[:5], 1):
+                    print(f"     {i}. {' '.join(bigram)} (частота: {freq})")
                 if len(bigrams) > 5:
-                    print(f"     ... и еще {len(bigrams) - 5} коллокаций")
+                    print(f"     ... и еще {len(bigrams) - 5} биграмм")
             else:
-                print("   ⚠️ Коллокации не найдены")
+                print("   ⚠️ Биграммы не найдены")
 
     elif choice == '4':
         print("\nВыберите режим поиска коллокаций:")
@@ -600,11 +631,9 @@ def interactive_search():
         sub_choice = input("\n👉 Ваш выбор (1/2): ").strip()
 
         if sub_choice == '1':
-            # Поиск по всем документам
             while True:
                 try:
-                    top_n = input(
-                        f"\n👉 Введите количество коллокаций для каждого документа (по умолчанию 30): ").strip()
+                    top_n = input(f"\n👉 Введите количество коллокаций для каждого документа (по умолчанию 30): ").strip()
                     if not top_n:
                         top_n = 30
                         break
@@ -619,7 +648,6 @@ def interactive_search():
             search_collocations_by_likelihood(doc_id=None, top_n=top_n)
 
         elif sub_choice == '2':
-            # Поиск в конкретном документе
             documents = show_documents_list()
             if not documents:
                 return
@@ -664,6 +692,6 @@ def interactive_search():
 
 
 if __name__ == "__main__":
-    print("🔍 СИСТЕМА ПОИСКА КОЛЛОКАЦИЙ (LIKELIHOOD RATIO)")
+    print("🔍 СИСТЕМА ПОИСКА БИГРАММ И КОЛЛОКАЦИЙ")
     print("=" * 60)
     interactive_search()
