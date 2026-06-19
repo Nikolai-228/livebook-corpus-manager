@@ -92,7 +92,6 @@ def show_documents_for_search():
         print("❌ Нет документов")
         return []
 
-    # Спрашиваем фильтр
     filter_text = input("\n👉 Введите текст для фильтрации названий (Enter для вывода всех): ").strip()
 
     filtered_docs = []
@@ -110,8 +109,6 @@ def show_documents_for_search():
 
     print(f"\n📊 Найдено документов: {len(filtered_docs)}")
     print(f"{'─' * 70}")
-
-    # Выводим в формате таблицы
     print(f"{'ID':<6} {'Тип':<15} {'Название'}")
     print(f"{'─' * 70}")
 
@@ -128,14 +125,75 @@ def show_documents_for_search():
     return filtered_docs
 
 
+def get_mask_explanation():
+    """Возвращает пояснение по составлению масок"""
+    return """
+📖 ПОЯСНЕНИЕ ПО СОСТАВЛЕНИЮ МАСОК (РЕГУЛЯРНЫХ ВЫРАЖЕНИЙ)
+
+1. 🔤 ВЫБОР ТЕКСТА:
+   - Оригинальный текст - поиск в исходном тексте документа
+   - Лемматизированный текст - поиск в приведённых к начальной форме словах
+     (например: "бежал" → "бежать", "книги" → "книга")
+   💡 Лемматизация помогает найти все формы слова
+
+2. 📝 ПОИСК ВСЕХ СЛОВОФОРМ:
+   Чтобы найти все формы слова, используйте:
+   - шаблон: институт\w*  - найдет "институт", "института", "институту" и т.д.
+   - шаблон: работ\w+     - найдет "работа", "работы", "работник" и т.д.
+   💡 Символ \w* означает "любое количество букв"
+
+3. 🌱 ПОИСК ПО ОПРЕДЕЛЕННОМУ КОРНЮ:
+   Чтобы найти слова с одним корнем, используйте:
+   - шаблон: студ\w+  - найдет "студент", "студенческий", "студенты"
+   - шаблон: инженер\w* - найдет "инженер", "инженера", "инженерный"
+   💡 Корень + \w+ (одна или более букв) находит все однокоренные слова
+
+4. 🔚 ВЫБОР ОКОНЧАНИЯ:
+   Один символ в окончании: 
+   - шаблон: работ\w    - найдет "работа", "работы", "работу"
+   - шаблон: студент\w  - найдет "студента", "студенту"
+
+   Несколько символов в окончании:
+   - шаблон: институт\w{3} - найдет слова с 3 буквами в окончании
+   - шаблон: завод\w{2,4}  - найдет слова с 2-4 буквами в окончании
+   💡 \w{3} - ровно 3 буквы, \w{2,4} - от 2 до 4 букв
+
+5. 📌 ПОЛЕЗНЫЕ СИМВОЛЫ:
+   • \d - любая цифра (0-9)
+   • \w - любая буква (русская или английская)
+   • \s - пробел
+   • . - любой символ
+   • + - одно или более повторений
+   • * - ноль или более повторений
+   • ? - ноль или одно повторение
+   • {n} - ровно n повторений
+   • {n,m} - от n до m повторений
+   • | - логическое ИЛИ
+   • () - группа
+   • [] - класс символов
+   • ^ - начало строки
+   • $ - конец строки
+
+6. 💡 ПРИМЕРЫ ДЛЯ ПОИСКА В ТЕКСТЕ:
+   • Найти все годы: \d{4}\s+год
+   • Найти все имена: [А-Я][а-я]+\s+[А-Я][а-я]+
+   • Найти email: [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+   • Найти телефон: 8[\- ]?\d{3}[\- ]?\d{3}[\- ]?\d{2}[\- ]?\d{2}
+   • Найти организацию: (?:ООО|ЗАО|ОАО|ПАО)\s+["«]?[А-Я][а-я]+["»]?
+   • Найти все слова с корнем "институт": институт\w*
+   • Найти все формы слова "работа": работ\w+
+   • Найти слова с окончанием из 2-3 букв: слово\w{2,3}
+
+7. ⚠️ ВАЖНО:
+   • Регистр имеет значение - используйте [А-Я] для заглавных и [а-я] для строчных
+   • Для поиска точной фразы используйте пробелы между словами
+   • Для поиска с учетом регистра включите соответствующую опцию
+"""
+
+
 def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool = False):
     """
     Поиск по регулярному выражению во всех документах
-
-    Аргументы:
-    - pattern: регулярное выражение для поиска
-    - case_sensitive: учитывать регистр (по умолчанию False)
-    - use_lemma: использовать лемматизированные тексты (по умолчанию False)
     """
     print(f"\n{'=' * 70}")
     print(f"🔍 ПОИСК ПО РЕГУЛЯРНОМУ ВЫРАЖЕНИЮ")
@@ -148,7 +206,6 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
     conn = connect_db()
 
     try:
-        # Выбираем таблицу для поиска
         if use_lemma:
             query = """
                 SELECT d.id, d.title, d.type, dl.content
@@ -173,7 +230,6 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
             print("❌ Нет документов для поиска")
             return
 
-        # Компилируем регулярное выражение
         flags = 0 if case_sensitive else re.IGNORECASE
         try:
             regex = re.compile(pattern, flags)
@@ -195,7 +251,6 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
             if not content:
                 continue
 
-            # Ищем все совпадения
             matches = []
             for match in regex.finditer(content):
                 start = max(0, match.start() - 50)
@@ -217,10 +272,8 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
                     'count': len(matches)
                 })
 
-        # Сортируем по количеству совпадений
         results.sort(key=lambda x: x['count'], reverse=True)
 
-        # Вывод результатов
         print(f"\n✅ Найдено документов с совпадениями: {len(results)}")
         print(f"✅ Всего совпадений: {sum(r['count'] for r in results)}")
 
@@ -232,15 +285,13 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
         print(f"📊 РЕЗУЛЬТАТЫ ПОИСКА:")
         print(f"{'=' * 70}")
 
-        for i, result in enumerate(results[:50], 1):  # Показываем топ-50 документов
+        for i, result in enumerate(results[:50], 1):
             print(f"\n{i:2d}. 📄 Документ ID: {result['id']}")
             print(f"    Название: {result['title']}")
             print(f"    Тип: {result['type']}")
             print(f"    Совпадений: {result['count']}")
 
-            # Показываем первые 5 совпадений
             for j, match in enumerate(result['matches'][:5], 1):
-                # Подсвечиваем совпадение
                 highlighted = match['context'].replace(
                     match['match'],
                     f"***{match['match']}***"
@@ -253,13 +304,11 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
         if len(results) > 50:
             print(f"\n... и еще {len(results) - 50} документов с совпадениями")
 
-        # Статистика по типам документов
         type_stats = Counter(r['type'] for r in results)
         print(f"\n📈 СТАТИСТИКА ПО ТИПАМ ДОКУМЕНТОВ:")
         for doc_type, count in type_stats.most_common():
             print(f"   {doc_type}: {count} документов")
 
-        # Статистика по частоте совпадений
         freq_stats = Counter(r['count'] for r in results)
         print(f"\n📈 СТАТИСТИКА ПО КОЛИЧЕСТВУ СОВПАДЕНИЙ:")
         for freq, count in sorted(freq_stats.items(), reverse=True)[:10]:
@@ -274,12 +323,6 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
 def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, use_lemma: bool = False):
     """
     Поиск по регулярному выражению в конкретном документе
-
-    Аргументы:
-    - doc_id: ID документа
-    - pattern: регулярное выражение для поиска
-    - case_sensitive: учитывать регистр (по умолчанию False)
-    - use_lemma: использовать лемматизированный текст (по умолчанию False)
     """
     print(f"\n{'=' * 70}")
     print(f"🔍 ПОИСК В ДОКУМЕНТЕ ПО РЕГУЛЯРНОМУ ВЫРАЖЕНИЮ")
@@ -293,7 +336,6 @@ def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, 
     conn = connect_db()
 
     try:
-        # Получаем документ
         if use_lemma:
             query = """
                 SELECT d.id, d.title, d.type, dl.content
@@ -331,7 +373,6 @@ def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, 
         print(f"   Тип: {doc_type if doc_type else 'Не указан'}")
         print(f"   Размер текста: {len(content)} символов")
 
-        # Компилируем регулярное выражение
         flags = 0 if case_sensitive else re.IGNORECASE
         try:
             regex = re.compile(pattern, flags)
@@ -339,7 +380,6 @@ def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, 
             print(f"❌ Ошибка в регулярном выражении: {e}")
             return
 
-        # Ищем все совпадения
         matches = []
         for match in regex.finditer(content):
             start = max(0, match.start() - 70)
@@ -361,19 +401,16 @@ def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, 
         print(f"\n✅ Найдено совпадений: {len(matches)}")
         print(f"{'─' * 70}")
 
-        # Выводим результаты
         for i, match in enumerate(matches, 1):
             print(f"\n{i:2d}. Совпадение: \"{match['match']}\"")
             print(f"    Позиция: {match['start']} - {match['end']}")
 
-            # Подсвечиваем совпадение в контексте
             highlighted = match['context'].replace(
                 match['match'],
                 f"***{match['match']}***"
             )
             print(f"    Контекст: ...{highlighted}...")
 
-        # Статистика
         match_counter = Counter(m['match'] for m in matches)
         print(f"\n📈 СТАТИСТИКА ПО СОВПАДЕНИЯМ:")
         print(f"   Всего совпадений: {len(matches)}")
@@ -382,7 +419,6 @@ def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, 
         for word, count in match_counter.most_common(10):
             print(f"     - {word}: {count} раз(а)")
 
-        # Позиции совпадений
         positions = [m['start'] for m in matches]
         if positions:
             print(f"\n📊 РАСПРЕДЕЛЕНИЕ ПО ТЕКСТУ:")
@@ -397,101 +433,11 @@ def search_in_document(doc_id: int, pattern: str, case_sensitive: bool = False, 
         conn.close()
 
 
-def search_by_mask_with_examples():
-    """Поиск по маске с примерами популярных регулярных выражений"""
-    print(f"\n{'=' * 70}")
-    print(f"🔍 ПОИСК ПО МАСКЕ С ПРИМЕРАМИ")
-    print(f"{'=' * 70}")
+def show_examples():
+    """Показывает примеры с пояснениями"""
+    print(get_mask_explanation())
 
-    print("\n📌 ПРИМЕРЫ РЕГУЛЯРНЫХ ВЫРАЖЕНИЙ:")
-    print(f"{'─' * 70}")
-
-    examples = [
-        {
-            'name': 'Имена (Иван Петров)',
-            'pattern': r'[А-Я][а-я]+\s+[А-Я][а-я]+',
-            'description': 'Два слова с заглавной буквы подряд'
-        },
-        {
-            'name': 'Имена с отчеством (Иван Иванович Петров)',
-            'pattern': r'[А-Я][а-я]+\s+[А-Я][а-я]+\s+[А-Я][а-я]+',
-            'description': 'Три слова с заглавной буквы подряд'
-        },
-        {
-            'name': 'Инициалы (И.И. Иванов)',
-            'pattern': r'[А-Я]\.\s*[А-Я]\.\s*[А-Я][а-я]+',
-            'description': 'Инициалы и фамилия'
-        },
-        {
-            'name': 'Названия организаций (ООО "Ромашка")',
-            'pattern': r'(?:ООО|ЗАО|ОАО|ПАО)\s+["«]?[А-Я][а-я]+["»]?',
-            'description': 'Организации с аббревиатурой'
-        },
-        {
-            'name': 'Названия институтов (Ижевский механический институт)',
-            'pattern': r'[А-Я][а-я]+(?:ский|ской)\s+[А-Я][а-я]+\s+(?:институт|университет|академия)',
-            'description': 'Названия учебных заведений'
-        },
-        {
-            'name': 'Годы (2024 год)',
-            'pattern': r'\d{4}\s+год(?:а)?',
-            'description': 'Год'
-        },
-        {
-            'name': 'Даты (01.01.2024)',
-            'pattern': r'\d{2}\.\d{2}\.\d{4}',
-            'description': 'Дата в формате ДД.ММ.ГГГГ'
-        },
-        {
-            'name': 'Телефоны (8-912-345-67-89)',
-            'pattern': r'8[\- ]?\d{3}[\- ]?\d{3}[\- ]?\d{2}[\- ]?\d{2}',
-            'description': 'Российский номер телефона'
-        },
-        {
-            'name': 'Email (user@example.com)',
-            'pattern': r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
-            'description': 'Электронная почта'
-        },
-        {
-            'name': 'Сайты (http://example.com)',
-            'pattern': r'https?://[^\s]+',
-            'description': 'URL адрес'
-        },
-        {
-            'name': 'Деньги (1000 рублей)',
-            'pattern': r'\d+[\.,]?\d*\s*(?:руб|рублей?|₽)',
-            'description': 'Денежные суммы в рублях'
-        },
-        {
-            'name': 'Проценты (25%)',
-            'pattern': r'\d+[\.,]?\d*\s*%',
-            'description': 'Проценты'
-        }
-    ]
-
-    for i, example in enumerate(examples, 1):
-        print(f"\n{i:2d}. {example['name']}:")
-        print(f"    Шаблон: {example['pattern']}")
-        print(f"    Описание: {example['description']}")
-
-    print(f"\n{'─' * 70}")
-    print("\n💡 СОВЕТЫ ПО СОСТАВЛЕНИЮ РЕГУЛЯРНЫХ ВЫРАЖЕНИЙ:")
-    print("   \\d  - любая цифра")
-    print("   \\w  - любая буква или цифра")
-    print("   \\s  - пробел")
-    print("   [А-Я] - любая заглавная русская буква")
-    print("   [а-я] - любая строчная русская буква")
-    print("   +    - одно или более повторений")
-    print("   *    - ноль или более повторений")
-    print("   {n}  - ровно n повторений")
-    print("   {n,m}- от n до m повторений")
-    print("   ?    - ноль или одно повторение")
-    print("   |    - логическое ИЛИ")
-    print("   ()   - группа")
-    print("   []   - класс символов")
-    print("   ^    - начало строки")
-    print("   $    - конец строки")
-    print("   .    - любой символ (кроме перевода строки)")
+    input("\n👉 Нажмите Enter для продолжения...")
 
 
 def interactive_search():
@@ -503,23 +449,33 @@ def interactive_search():
     print("\nВыберите режим работы:")
     print("1 - Поиск во всех документах")
     print("2 - Поиск в конкретном документе")
-    print("3 - Показать примеры регулярных выражений")
+    print("3 - Показать примеры и пояснения по маскам")
 
     choice = input("\n👉 Ваш выбор (1/2/3): ").strip()
 
     if choice == '1':
+        # Сначала показываем пояснение
+        print("\n📖 Для справки посмотрите примеры в пункте 3 меню")
+        print("   или нажмите Enter для продолжения...")
+        input()
+
         pattern = input("\n👉 Введите регулярное выражение: ").strip()
         if not pattern:
             print("❌ Шаблон не может быть пустым!")
             return
 
+        print("\n🔧 Настройки поиска:")
         case_sensitive = input("👉 Учитывать регистр? (y/n, по умолчанию n): ").strip().lower() == 'y'
-        use_lemma = input("👉 Использовать лемматизированный текст? (y/n, по умолчанию n): ").strip().lower() == 'y'
+
+        print("\n📝 Выберите тип текста:")
+        print("   1 - Оригинальный текст")
+        print("   2 - Лемматизированный текст (все формы слов)")
+        text_choice = input("👉 Ваш выбор (1/2, по умолчанию 1): ").strip()
+        use_lemma = text_choice == '2'
 
         search_by_regex(pattern, case_sensitive, use_lemma)
 
     elif choice == '2':
-        # Показываем список документов для выбора
         filtered_docs = show_documents_for_search()
         if not filtered_docs:
             return
@@ -528,8 +484,6 @@ def interactive_search():
             try:
                 doc_id = input(f"\n👉 Введите ID документа: ").strip()
                 doc_id = int(doc_id)
-
-                # Проверяем, существует ли такой документ
                 if any(doc[0] == doc_id for doc in filtered_docs):
                     break
                 else:
@@ -537,18 +491,30 @@ def interactive_search():
             except ValueError:
                 print("❌ Пожалуйста, введите корректный числовой ID")
 
+        # Спрашиваем, нужно ли показать пояснение
+        show_help = input("\n👉 Показать пояснение по маскам? (y/n, по умолчанию n): ").strip().lower() == 'y'
+        if show_help:
+            print(get_mask_explanation())
+            input("\n👉 Нажмите Enter для продолжения...")
+
         pattern = input("\n👉 Введите регулярное выражение: ").strip()
         if not pattern:
             print("❌ Шаблон не может быть пустым!")
             return
 
+        print("\n🔧 Настройки поиска:")
         case_sensitive = input("👉 Учитывать регистр? (y/n, по умолчанию n): ").strip().lower() == 'y'
-        use_lemma = input("👉 Использовать лемматизированный текст? (y/n, по умолчанию n): ").strip().lower() == 'y'
+
+        print("\n📝 Выберите тип текста:")
+        print("   1 - Оригинальный текст")
+        print("   2 - Лемматизированный текст (все формы слов)")
+        text_choice = input("👉 Ваш выбор (1/2, по умолчанию 1): ").strip()
+        use_lemma = text_choice == '2'
 
         search_in_document(doc_id, pattern, case_sensitive, use_lemma)
 
     elif choice == '3':
-        search_by_mask_with_examples()
+        show_examples()
 
     else:
         print("❌ Неверный выбор!")
