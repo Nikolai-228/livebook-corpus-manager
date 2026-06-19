@@ -179,7 +179,7 @@ chapters (id, name)
 
 ## ⚙️ Требования
 
-- Python 3.8+
+- Python 3.8+ (рекомендован 3.13)
 - PostgreSQL 12+
 - Сервисный аккаунт Google с включённым Drive API
 
@@ -189,7 +189,7 @@ chapters (id, name)
 
 | Проблема | Решение |
 |----------|---------|
-| `No module named 'tools'` | Удали `kreuzberg`: `pip uninstall kreuzberg` |
+| `No module named 'tools'` | `pip install tools`, если не помогло `pip uninstall kreuzberg`, `pip install kreuzberg[all]` |
 | `module 'fitz' has no attribute 'open'` | Установи PyMuPDF: `pip install PyMuPDF` |
 | Ошибка подключения к БД | Проверь `DATABASE_DSN` в `config.py` |
 | Сервисный аккаунт не имеет доступа | Добавь email сервисного аккаунта в права папки на Google Drive |
