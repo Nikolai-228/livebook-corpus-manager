@@ -1,7 +1,6 @@
 # postprocessing/text_cleaner.py
 """
 Единый модуль постобработки текстов и заголовков
-Без нейросетей, без лишних полей, только регулярки
 """
 
 import re
@@ -48,10 +47,6 @@ def clean_text_basic(text):
 
 
 def fix_pdf_text(text):
-    """
-    Специальная очистка для PDF: склеивает разорванные слова.
-    Примеры: "конеч-\nно" -> "конечно", "сегод ня" -> "сегодня"
-    """
     if not text:
         return ""
 
@@ -113,11 +108,50 @@ def clean_title(title, content):
     """
     if not title:
         title = "Без названия"
-
     original_title = title.strip()
-
     # Удаляем число в начале: цифры, точки, запятые, затем пробелы/дефисы/точки
     cleaned = re.sub(r'^[\d\,\.]+[\s\-\.]*', '', original_title)
+    # Первая буква заглавная, остальные как есть
+    if cleaned and len(cleaned) > 0:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    # Если после очистки пусто
+    if not cleaned or cleaned.isspace():
+        cleaned = "Без названия"
+    # Проверяем, пустой ли content
+    # content считается пустым, если: None, или пустая строка, или только пробелы, или очень короткий (< 50 символов)
+    is_content_empty = (
+            content is None or
+            not content.strip() or
+            len(content.strip()) < 50
+    )
+    # Если контента нет или он очень короткий (скорее всего фото), добавляем префикс
+    if is_content_empty:
+        return f'Документ с фотографиями "{cleaned}"'
+
+    return cleaned
+
+
+# ==========================================================
+# 2.1 ОЧИСТКА НАЗВАНИЯ ПАПКИ (folder name)
+# ==========================================================
+
+def clean_folder_name(folder_name):
+    """
+    Обрабатывает название папки по правилам:
+    1. Удаляет число в начале (1, 1.2, 1.2.3, 42,1)
+    2. Делает первую букву заглавной
+    3. Удаляет лишние пробелы
+    """
+    if not folder_name:
+        return "Без названия"
+
+    original_name = folder_name.strip()
+
+    # Удаляем число в начале: цифры, точки, запятые, затем пробелы/дефисы/точки
+    cleaned = re.sub(r'^[\d\,\.]+[\s\-\.]*', '', original_name)
+
+    # Удаляем множественные пробелы
+    cleaned = re.sub(r'\s+', ' ', cleaned)
 
     # Первая буква заглавная, остальные как есть
     if cleaned and len(cleaned) > 0:
@@ -127,19 +161,7 @@ def clean_title(title, content):
     if not cleaned or cleaned.isspace():
         cleaned = "Без названия"
 
-    # Проверяем, пустой ли content
-    # content считается пустым, если: None, или пустая строка, или только пробелы, или очень короткий (< 50 символов)
-    is_content_empty = (
-            content is None or
-            not content.strip() or
-            len(content.strip()) < 50
-    )
-
-    # Если контента нет или он очень короткий (скорее всего фото), добавляем префикс
-    if is_content_empty:
-        return f'Документ с фотографиями "{cleaned}"'
-
-    return cleaned
+    return cleaned.strip()
 
 
 # ==========================================================
@@ -281,18 +303,147 @@ def process_all_documents(limit=None, dry_run=False):
 
 
 # ==========================================================
+# 3.1 ОБРАБОТКА ПАПОК (FOLDERS)
+# ==========================================================
+
+def process_all_folders(limit=None, dry_run=False):
+    """
+    Обрабатывает ВСЕ папки в БД:
+    - Очищает name (удаление чисел в начале, заглавная буква)
+    - Сохраняет результаты прямо в поле name
+
+    Args:
+        limit: Ограничить количество папок
+        dry_run: Только показать, что будет сделано
+    """
+    print("=" * 70)
+    print("📁 ПОСТОБРАБОТКА НАЗВАНИЙ ПАПОК")
+    print("   - Очистка name (удаление чисел, заглавная буква)")
+    print("=" * 70)
+
+    if dry_run:
+        print("⚠️ РЕЖИМ DRY RUN: изменения НЕ будут сохранены")
+
+    try:
+        conn = psycopg2.connect(DATABASE_DSN)
+        print("✅ Подключение к PostgreSQL установлено")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к БД: {e}")
+        return
+
+    cursor = conn.cursor()
+
+    # Получаем папки
+    query = """
+        SELECT id, name, full_path 
+        FROM folders 
+        ORDER BY id
+    """
+    if limit:
+        query += f" LIMIT {limit}"
+
+    cursor.execute(query)
+    folders = cursor.fetchall()
+
+    print(f"\n📁 Найдено папок: {len(folders)}")
+
+    if not folders:
+        print("❌ Папки не найдены")
+        conn.close()
+        return
+
+    # Статистика
+    stats = {
+        'total': len(folders),
+        'changed': 0,
+        'errors': 0
+    }
+
+    # Показываем примеры
+    print("\n📋 ПРИМЕРЫ ОБРАБОТКИ (первые 5):")
+    print("-" * 70)
+    for folder_id, old_name, full_path in folders[:5]:
+        new_name = clean_folder_name(old_name)
+        print(f"   📁 ID: {folder_id}")
+        print(f"      Было: {old_name[:50] if old_name else 'None'}")
+        print(f"      Стало: {new_name[:50]}")
+        print()
+
+    if dry_run:
+        print("⚠️ DRY RUN: изменения не будут применены")
+        conn.close()
+        return
+
+    # Обрабатываем папки
+    print("\n🔄 Обработка...")
+
+    with tqdm(total=stats['total'], desc="Обработка", unit="папка") as pbar:
+        for folder_id, old_name, full_path in folders:
+            try:
+                new_name = clean_folder_name(old_name)
+
+                if new_name != old_name:
+                    stats['changed'] += 1
+                    cursor.execute("""
+                        UPDATE folders 
+                        SET name = %s 
+                        WHERE id = %s
+                    """, (new_name, folder_id))
+
+                    # Периодический коммит
+                    if stats['changed'] % 100 == 0:
+                        conn.commit()
+
+            except Exception as e:
+                stats['errors'] += 1
+                print(f"\n❌ Ошибка папки {folder_id}: {e}")
+
+            pbar.update(1)
+            pbar.set_postfix({
+                'изменено': stats['changed'],
+                'ошибок': stats['errors']
+            })
+
+    # Финальный коммит
+    conn.commit()
+
+    # Итоговая статистика
+    print("\n" + "=" * 70)
+    print("📊 СТАТИСТИКА ОБРАБОТКИ ПАПОК")
+    print(f"   📁 Всего папок: {stats['total']}")
+    print(f"   🔧 Изменено названий: {stats['changed']}")
+    print(f"   ❌ Ошибок: {stats['errors']}")
+    print("=" * 70)
+
+    cursor.close()
+    conn.close()
+    print("\n✅ Обработка папок завершена!")
+
+
+# ==========================================================
 # 4. ТОЧКА ВХОДА
 # ==========================================================
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Постобработка документов')
+    parser = argparse.ArgumentParser(description='Постобработка документов и папок')
     parser.add_argument('--limit', '-l', type=int, help='Ограничить количество')
     parser.add_argument('--dry-run', action='store_true', help='Пробный запуск без сохранения')
+    parser.add_argument('--folders', '-f', action='store_true', help='Обработать названия папок')
+    parser.add_argument('--documents', '-d', action='store_true', help='Обработать документы')
 
     args = parser.parse_args()
 
-    process_all_documents(limit=args.limit, dry_run=args.dry_run)
+    # Если не указан тип, обрабатываем всё
+    if not args.folders and not args.documents:
+        args.documents = True
+        args.folders = True
+
+    if args.documents:
+        process_all_documents(limit=args.limit, dry_run=args.dry_run)
+
+    if args.folders:
+        process_all_folders(limit=args.limit, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
