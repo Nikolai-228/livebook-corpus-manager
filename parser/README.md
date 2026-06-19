@@ -43,10 +43,8 @@ parser/
 ### 1. Установка зависимостей
 
 ```bash
-pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4 psycopg2-binary PyMuPDF requests
+pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib beautifulsoup4 psycopg2-binary PyMuPDF kreuzberg requests
 ```
-
-> **Важно:** `kreuzberg` больше не используется.
 
 ### 2. Создание базы данных
 
