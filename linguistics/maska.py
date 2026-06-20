@@ -1,19 +1,8 @@
 import psycopg2
 import re
 from collections import defaultdict, Counter
-
-DB_CONFIG = {
-    'host': 'livebook-team.duckdns.org',
-    'port': 5432,
-    'user': 'team_user',
-    'password': 'book_live',
-    'database': 'livebook_corpus'
-}
-
-
-def connect_db():
-    return psycopg2.connect(**DB_CONFIG)
-
+# Подключение к БД
+from db_connection import connect_db, DB_CONFIG
 
 def get_all_documents():
     """Получает все документы из БД"""
@@ -79,7 +68,6 @@ def get_document_content(doc_id: int):
         return None
     finally:
         conn.close()
-
 
 def show_documents_for_search():
     """Показывает список документов для выбора с возможностью фильтрации"""
@@ -192,9 +180,6 @@ def get_mask_explanation():
 
 
 def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool = False):
-    """
-    Поиск по регулярному выражению во всех документах
-    """
     print(f"\n{'=' * 70}")
     print(f"🔍 ПОИСК ПО РЕГУЛЯРНОМУ ВЫРАЖЕНИЮ")
     print(f"{'=' * 70}")
@@ -202,9 +187,7 @@ def search_by_regex(pattern: str, case_sensitive: bool = False, use_lemma: bool 
     print(f"   Регистр: {'учтён' if case_sensitive else 'не учтён'}")
     print(f"   Текст: {'лемматизированный' if use_lemma else 'оригинальный'}")
     print(f"{'=' * 70}")
-
     conn = connect_db()
-
     try:
         if use_lemma:
             query = """

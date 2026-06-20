@@ -7,7 +7,6 @@ from pymorphy3 import MorphAnalyzer
 import nltk
 import re
 from collections import Counter
-
 # Скачиваем необходимые данные
 try:
     nltk.data.find('tokenizers/punkt')
@@ -16,20 +15,9 @@ except LookupError:
     nltk.download('punkt_tab', quiet=True)
     nltk.download('stopwords', quiet=True)
 
-DB_CONFIG = {
-    'host': 'livebook-team.duckdns.org',
-    'port': 5432,
-    'user': 'team_user',
-    'password': 'book_live',
-    'database': 'livebook_corpus'
-}
-
+# Подключение к БД
+from db_connection import connect_db, DB_CONFIG
 RUSSIAN_STOP_WORDS = set(stopwords.words('russian'))
-
-
-def connect_db():
-    return psycopg2.connect(**DB_CONFIG)
-
 
 def get_all_documents_with_lemmas():
     """Получает все документы с лемматизированным текстом и названиями"""
@@ -50,7 +38,6 @@ def get_all_documents_with_lemmas():
         return []
     finally:
         conn.close()
-
 
 def get_document_info(doc_id: int):
     """Получает информацию о документе (название, тип)"""
@@ -75,7 +62,6 @@ def get_document_info(doc_id: int):
     finally:
         conn.close()
 
-
 def get_lemmatized_text(doc_id: int):
     """Получает лемматизированный текст из таблицы documents_lemmatized"""
     conn = connect_db()
@@ -96,7 +82,6 @@ def get_lemmatized_text(doc_id: int):
     finally:
         conn.close()
 
-
 def find_lemmatized_trigram_contexts(lemmatized_text: str, word1: str, word2: str, word3: str,
                                      context_size: int = 70) -> list:
     """Находит ВСЕ контексты для триграммы в лемматизированном тексте"""
@@ -114,36 +99,19 @@ def find_lemmatized_trigram_contexts(lemmatized_text: str, word1: str, word2: st
 
 
 def extract_trigrams_from_lemmatized(lemmatized_text: str, top_n: int = 50) -> list:
-    """
-    Извлекает триграммы из лемматизированного текста по частоте (без Likelihood Ratio)
-    """
     if not lemmatized_text:
         return []
-
-    # Разбиваем лемматизированный текст на леммы
     tokens = lemmatized_text.lower().split()
-
-    # Фильтруем стоп-слова и слишком короткие слова
     tokens = [t for t in tokens if t not in RUSSIAN_STOP_WORDS and len(t) > 1]
-
     if len(tokens) < 3:
         return []
-
-    # Создаем finder для триграмм
     finder = TrigramCollocationFinder.from_words(tokens)
-
-    # Фильтруем редкие триграммы (встречаются менее 2 раз)
     finder.apply_freq_filter(2)
-
-    # Получаем топ-N триграмм по частоте
     trigrams_freq = finder.nbest(TrigramAssocMeasures.raw_freq, top_n)
-
-    # Формируем результат: (триграмма, частота)
     result = []
     for trigram in trigrams_freq:
         freq = finder.ngram_fd[trigram]
         result.append((trigram, freq))
-
     return result
 
 

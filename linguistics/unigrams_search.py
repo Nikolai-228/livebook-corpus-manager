@@ -15,25 +15,87 @@ except LookupError:
     nltk.download('punkt_tab', quiet=True)
     nltk.download('stopwords', quiet=True)
 
-DB_CONFIG = {
-    'host': 'livebook-team.duckdns.org',
-    'port': 5432,
-    'user': 'team_user',
-    'password': 'book_live',
-    'database': 'livebook_corpus'
+# Подключение к БД
+from db_connection import connect_db, DB_CONFIG
+
+# Базовые стоп-слова из NLTK
+RUSSIAN_STOP_WORDS = set(stopwords.words('russian'))
+
+# Дополнительные стоп-слова для фильтрации
+EXTRA_STOP_WORDS = {
+    # Предлоги
+    'без', 'в', 'для', 'до', 'за', 'из', 'к', 'на', 'над', 'о', 'об', 'от', 'по',
+    'под', 'при', 'про', 'с', 'со', 'у', 'через', 'между', 'ради', 'сквозь',
+    'вокруг', 'около', 'возле', 'близ', 'вдоль', 'мимо', 'напротив', 'позади',
+    'посреди', 'среди', 'сверх', 'через', 'вследствие', 'благодаря', 'несмотря',
+    'ввиду', 'вместо', 'вроде', 'насчет', 'относительно', 'согласно', 'сообразно',
+    'вслед', 'навстречу', 'наперекор', 'наподобие', 'помимо', 'после', 'прежде',
+    'против', 'среди', 'у', 'через',
+
+    # Союзы
+    'а', 'и', 'или', 'но', 'да', 'же', 'либо', 'то', 'того', 'так', 'как',
+    'что', 'чтобы', 'будто', 'словно', 'точно', 'как-будто', 'также', 'зато',
+    'однако', 'причем', 'притом', 'потому', 'поэтому', 'оттого', 'зачем', 'почему',
+
+    # Частицы
+    'не', 'ни', 'бы', 'б', 'же', 'ж', 'ли', 'ль', 'уж', 'вот', 'вон', 'ведь',
+    'даже', 'уже', 'еще', 'ещё', 'почти', 'только', 'лишь', 'хоть', 'хотя',
+    'пусть', 'пускай', 'авось', 'небось', 'мол', 'де', 'дескать', 'также',
+
+    # Местоимения
+    'я', 'ты', 'он', 'она', 'оно', 'мы', 'вы', 'они', 'себя',
+    'меня', 'тебя', 'его', 'ее', 'нас', 'вас', 'их',
+    'мне', 'тебе', 'ему', 'ей', 'нам', 'вам', 'им',
+    'мой', 'твой', 'свой', 'наш', 'ваш', 'его', 'ее', 'их',
+    'этот', 'эта', 'это', 'эти', 'тот', 'та', 'то', 'те',
+    'весь', 'вся', 'все', 'всё', 'всех', 'всем', 'всеми',
+    'сам', 'сама', 'само', 'сами', 'который', 'которая', 'которое', 'которые',
+
+    # Глаголы-связки
+    'быть', 'являться', 'стать', 'становиться', 'находиться', 'называться',
+    'оказаться', 'оказываться', 'представлять', 'представляться',
+
+    # Вспомогательные слова
+    'это', 'этот', 'эта', 'это', 'эти', 'того', 'тому', 'тем', 'том',
+    'этим', 'этой', 'этих', 'этим', 'этими',
+
+    # Слова-паразиты
+    'так', 'ну', 'вот', 'типа', 'как', 'бы', 'как-то', 'что-то',
+    'где-то', 'когда-то', 'кто-то', 'что-нибудь', 'как-нибудь',
+
+    # Междометия
+    'ой', 'ай', 'ух', 'ах', 'эх', 'ох', 'ну',
+
+    # Другие часто встречаемые слова
+    'год', 'года', 'лет', 'месяц', 'день', 'ночь', 'утро', 'вечер',
+    'раз', 'два', 'три', 'четыре', 'пять', 'один', 'одна', 'одно',
+    'другой', 'другая', 'другое', 'другие', 'разный', 'разные',
+    'также', 'ещё', 'еще', 'уже', 'тоже', 'либо', 'кроме', 'включая',
+    'включая', 'исключая', 'более', 'менее', 'очень', 'слишком',
+    'достаточно', 'совсем', 'вполне', 'абсолютно', 'почти', 'около',
+    'примерно', 'ровно', 'точно', 'аккуратно', 'осторожно',
+
+    # Короткие слова (фильтруются отдельно)
+    'в', 'и', 'на', 'с', 'к', 'у', 'о', 'об', 'от', 'до', 'за', 'из',
+    'под', 'над', 'во', 'ко', 'со', 'обо', 'подо', 'надо', 'предо',
+
+    # Вопросительные слова
+    'что', 'кто', 'где', 'куда', 'откуда', 'когда', 'почему', 'зачем',
+    'как', 'какой', 'какая', 'какое', 'какие', 'сколько', 'насколько',
+
+    # Относительные слова
+    'который', 'которая', 'которое', 'которые', 'которого', 'которой',
+    'которых', 'которым', 'которыми', 'чей', 'чья', 'чье', 'чьи',
 }
 
-RUSSIAN_STOP_WORDS = set(stopwords.words('russian'))
+# Объединяем все стоп-слова
+STOP_WORDS = RUSSIAN_STOP_WORDS | EXTRA_STOP_WORDS
 
 ABBREVIATIONS = {
     'ИжГТУ': 'ижгту', 'ижгту': 'ижгту', 'ими': 'ими',
 }
 
 PROTECTED_WORDS = {'ижгту'}
-
-
-def connect_db():
-    return psycopg2.connect(**DB_CONFIG)
 
 
 def get_all_documents():
@@ -112,7 +174,7 @@ def get_all_documents_with_lemmas():
             cur.execute("""
                 SELECT d.id, d.title, d.type, dl.content, d.content
                 FROM documents d
-                INNER JOIN content dl ON d.id = dl.id_documents
+                INNER JOIN documents_lemmatized dl ON d.id = dl.id_documents
                 WHERE d.content IS NOT NULL AND d.content != ''
                 ORDER BY d.id
             """)
@@ -133,7 +195,7 @@ def lemmatize_text(text: str, morph) -> list:
     # Очистка текста
     text = re.sub(r'[^\w\s]', ' ', text)
     tokens = word_tokenize(text.lower(), language='russian')
-    tokens = [t for t in tokens if t.isalpha() and t not in RUSSIAN_STOP_WORDS]
+    tokens = [t for t in tokens if t.isalpha() and t not in STOP_WORDS]
 
     lemmas = []
     for token in tokens:
@@ -142,7 +204,7 @@ def lemmatize_text(text: str, morph) -> list:
             continue
         try:
             lemma = morph.parse(token)[0].normal_form
-            if len(lemma) >= 2:
+            if len(lemma) >= 2 and lemma not in STOP_WORDS:
                 lemmas.append(lemma)
         except Exception:
             pass
@@ -169,15 +231,29 @@ def find_all_contexts(text: str, word: str, context_size: int = 70) -> list:
     return contexts
 
 
+def is_stop_word(word: str) -> bool:
+    """Проверяет, является ли слово стоп-словом"""
+    word_lower = word.lower()
+    return word_lower in STOP_WORDS or len(word_lower) <= 2
+
+
+def filter_lemmas(lemmas_counter: Counter) -> Counter:
+    """
+    Фильтрует леммы, удаляя стоп-слова и слишком короткие слова
+    """
+    filtered = {}
+    for lemma, count in lemmas_counter.items():
+        if not is_stop_word(lemma):
+            filtered[lemma] = count
+    return Counter(filtered)
+
+
 def search_unigrams(search_word: str, limit: int = 20):
-    """Поиск по униграммам (отдельным словам) с использованием лемматизированных документов"""
     print(f"\n{'=' * 60}")
     print(f"🔍 ПОИСК ПО УНИГРАММАМ: '{search_word}'")
     print(f"{'=' * 60}")
-
     morph = MorphAnalyzer()
     conn = connect_db()
-
     try:
         # Получаем лемму искомого слова
         search_lemma = lemmatize_text(search_word, morph)
@@ -185,23 +261,20 @@ def search_unigrams(search_word: str, limit: int = 20):
             print("Не удалось определить лемму для поиска")
             return
         search_lemma = search_lemma[0]
-
         print(f"🔑 Лемма для поиска: '{search_lemma}'")
-
         # Получаем все документы с лемматизированным текстом
         documents = get_all_documents_with_lemmas()
-
         if not documents:
             print("❌ Нет документов с лемматизированным текстом")
             return
-
         results = []
         for doc_id, title, doc_type, lemmatized_text, original_content in documents:
             if not lemmatized_text or not original_content:
                 continue
-
             # Разбиваем лемматизированный текст на леммы
             lemmas_list = lemmatized_text.split()
+            # Фильтруем стоп-слова
+            lemmas_list = [l for l in lemmas_list if not is_stop_word(l)]
 
             # Подсчитываем частоту леммы
             freq = lemmas_list.count(search_lemma)
@@ -211,16 +284,12 @@ def search_unigrams(search_word: str, limit: int = 20):
                 contexts = find_all_contexts(original_content, search_word, 70)
 
                 # Важно: количество контекстов должно совпадать с частотой
-                # Если контекстов меньше, чем частота, ищем также по лемме
                 if len(contexts) < freq:
-                    # Ищем по лемме в оригинальном тексте
                     lemm_contexts = find_all_contexts(original_content, search_lemma, 70)
-                    # Добавляем недостающие контексты
                     for ctx in lemm_contexts:
                         if ctx not in contexts:
                             contexts.append(ctx)
 
-                # Обрезаем до частоты, если контекстов больше
                 contexts = contexts[:freq]
 
                 results.append({
@@ -243,7 +312,6 @@ def search_unigrams(search_word: str, limit: int = 20):
             print(f"   Всего лемм в документе: {r['total_lemmas']}")
             print(f"   Всего контекстов: {len(r['contexts'])}")
 
-            # Проверка соответствия
             if len(r['contexts']) == r['frequency']:
                 print(f"   ✅ Количество контекстов соответствует частоте")
             else:
@@ -271,13 +339,11 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
     print(f"{'=' * 60}")
 
     try:
-        # Получаем информацию о документе
         doc_info = get_document_content(doc_id)
         if not doc_info:
             print(f"❌ Документ с ID {doc_id} не найден")
             return
 
-        # Получаем лемматизированный текст
         lemmatized_text = get_lemmatized_text(doc_id)
         if not lemmatized_text:
             print(f"❌ Для документа ID {doc_id} нет лемматизированной версии")
@@ -290,35 +356,33 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
         print(f"   Тип файла: {doc_info['type'] if doc_info['type'] else 'Не указан'}")
         print(f"   Размер текста: {len(doc_info['content'])} символов")
 
-        # Разбиваем лемматизированный текст на леммы
         print(f"\n🔄 Обработка лемматизированного текста...")
         lemmas_list = lemmatized_text.split()
         print(f"   Всего лемм в документе: {len(lemmas_list)}")
 
+        # Фильтруем стоп-слова
+        lemmas_list_filtered = [l for l in lemmas_list if not is_stop_word(l)]
+        print(f"   Лемм после фильтрации стоп-слов: {len(lemmas_list_filtered)}")
+
         # Подсчитываем частоту каждой леммы
-        lemma_freq = Counter(lemmas_list)
+        lemma_freq = Counter(lemmas_list_filtered)
 
         # Получаем топ-N лемм
         top_lemmas = lemma_freq.most_common(top_n)
 
         print(f"\n📊 ТОП-{top_n} САМЫХ ЧАСТЫХ УНИГРАММ (ЛЕММ):")
+        print(f"   (стоп-слова и короткие слова удалены)")
         print(f"{'─' * 60}")
 
         for i, (lemma, freq) in enumerate(top_lemmas, 1):
-            # Находим ВСЕ контексты для каждой топ-леммы в оригинальном тексте
             contexts = []
             if doc_info['content']:
-                # Сначала ищем лемму в оригинальном тексте
                 contexts = find_all_contexts(doc_info['content'], lemma, 60)
 
-                # Если контекстов меньше, чем частота, ищем по разным формам слова
                 if len(contexts) < freq:
-                    # Пробуем искать слово в разных формах
                     morph = MorphAnalyzer()
-                    # Получаем все формы слова
                     try:
                         parsed = morph.parse(lemma)[0]
-                        # Ищем все возможные формы
                         for form in parsed.lexeme:
                             if form.word != lemma:
                                 more_contexts = find_all_contexts(doc_info['content'], form.word, 60)
@@ -328,14 +392,12 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
                     except Exception:
                         pass
 
-            # Обрезаем до частоты, если контекстов больше
             contexts = contexts[:freq]
 
             print(f"\n{i:2d}. Лемма: \"{lemma}\"")
             print(f"    Частота: {freq} раз(а)")
             print(f"    Всего контекстов: {len(contexts)}")
 
-            # Проверка соответствия
             if len(contexts) == freq:
                 print(f"    ✅ Количество контекстов соответствует частоте")
             else:
@@ -351,14 +413,15 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
             else:
                 print("    Контексты не найдены")
 
-        # Дополнительная статистика
         print(f"\n📈 СТАТИСТИКА ПО ДОКУМЕНТУ:")
         print(f"   Всего уникальных лемм: {len(lemma_freq)}")
-        print(f"   Всего лемм (с повторениями): {len(lemmas_list)}")
+        print(f"   Всего лемм (с повторениями): {len(lemmas_list_filtered)}")
         if top_lemmas:
             print(f"   Самая частотная лемма: '{top_lemmas[0][0]}' ({top_lemmas[0][1]} раз)")
             if len(top_lemmas) > 1:
                 print(f"   Вторая по частотности: '{top_lemmas[1][0]}' ({top_lemmas[1][1]} раз)")
+
+        print(f"\n💡 Список стоп-слов включает {len(STOP_WORDS)} слов")
 
     except Exception as e:
         print(f"❌ Ошибка: {e}")
@@ -393,19 +456,16 @@ def interactive_top_unigrams():
     print("🏆 ВЫВОД ТОП-20 УНИГРАММ ПО ДОКУМЕНТУ")
     print(f"{'=' * 60}")
 
-    # Показываем список документов
     documents = show_documents_list()
 
     if not documents:
         return
 
-    # Выбор документа
     while True:
         try:
             doc_id = input(f"\n👉 Введите ID документа: ").strip()
             doc_id = int(doc_id)
 
-            # Проверяем существует ли документ
             doc_exists = False
             has_lemmas = False
             for doc in documents:
@@ -428,7 +488,6 @@ def interactive_top_unigrams():
             print("\n👋 Отмена")
             return
 
-    # Ввод количества униграмм для вывода
     while True:
         try:
             top_n = input("\n👉 Введите количество униграмм для вывода (по умолчанию 20): ").strip()
@@ -443,7 +502,6 @@ def interactive_top_unigrams():
         except ValueError:
             print("❌ Пожалуйста, введите корректное число")
 
-    # Выводим топ униграмм
     get_top_unigrams_in_document(doc_id, top_n)
 
 

@@ -1,3 +1,4 @@
+# documents_lemmatized.py
 import psycopg2
 from psycopg2 import sql
 from nltk.tokenize import word_tokenize
@@ -13,14 +14,8 @@ except LookupError:
     nltk.download('punkt', quiet=True)
     nltk.download('punkt_tab', quiet=True)
 
-# Параметры подключения к БД
-DB_CONFIG = {
-    'host': 'livebook-team.duckdns.org',
-    'port': 5432,
-    'user': 'team_user',
-    'password': 'book_live',
-    'database': 'livebook_corpus'
-}
+# Подключение к БД
+from db_connection import connect_db, DB_CONFIG
 
 # Словарь для замены аббревиатур и специальных слов
 ABBREVIATIONS = {
@@ -81,7 +76,7 @@ ABBREVIATIONS = {
 }
 
 # Слова слов, которые НЕ нужно лемматизировать (сохраняем как есть)
-PROTECTED_WORDS = { 'ижгту' }
+PROTECTED_WORDS = {'ижгту'}
 
 
 def preprocess_text(text):
@@ -99,16 +94,6 @@ def preprocess_text(text):
         result = re.sub(pattern, full, result, flags=re.IGNORECASE)
 
     return result
-
-
-def connect_db():
-    """Создает и возвращает соединение с БД"""
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        return conn
-    except Exception as e:
-        print(f"Ошибка подключения к БД: {e}")
-        raise
 
 
 def create_lemmatized_table(conn):
@@ -174,31 +159,21 @@ def fetch_documents(conn):
 
 
 def lemmatize_text(text, morph):
-    """Лемматизирует переданный текст с предобработкой и защитой слов.
-       Возвращает кортеж (лемматизированный_текст, количество_уникальных_лемм, общее_количество_токенов)"""
     if not text or not isinstance(text, str):
         return "", 0, 0
-
     # Предобработка: замена аббревиатур и сокращений
     text = preprocess_text(text)
-
     # Токенизация
     tokens = word_tokenize(text, language='russian')
-
     # Лемматизация с защитой определенных слов
     lemmas_list = []
     total_tokens = 0
-
     for token in tokens:
         token_lower = token.lower()
-
-        # Если слово в защищенном списке или это аббревиатура с подчеркиваниями
         if token_lower in PROTECTED_WORDS or '_' in token:
             lemmas_list.append(token_lower)
             total_tokens += 1
             continue
-
-        # Оставляем только буквы (убираем знаки пунктуации)
         if token.isalpha():
             total_tokens += 1
             try:
@@ -209,15 +184,9 @@ def lemmatize_text(text, morph):
                     lemmas_list.append(lemma)
             except Exception:
                 lemmas_list.append(token_lower)
-        # Для небуквенных токенов (цифры, знаки) - пропускаем
-
-    # Подсчет уникальных лемм
     unique_lemmas = set(lemmas_list)
     unique_lemmas_count = len(unique_lemmas)
-
-    # Формируем строку лемм (с повторениями для сохранения порядка)
     lemmatized_text = ' '.join(lemmas_list)
-
     return lemmatized_text, unique_lemmas_count, total_tokens
 
 

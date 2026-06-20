@@ -2,19 +2,8 @@ import psycopg2
 import re
 from collections import defaultdict, Counter
 import json
-
-DB_CONFIG = {
-    'host': 'livebook-team.duckdns.org',
-    'port': 5432,
-    'user': 'team_user',
-    'password': 'book_live',
-    'database': 'livebook_corpus'
-}
-
-
-def connect_db():
-    return psycopg2.connect(**DB_CONFIG)
-
+# Подключение к БД
+from db_connection import connect_db, DB_CONFIG
 
 def get_all_documents():
     """Получает все документы с оригинальным текстом"""
@@ -34,7 +23,6 @@ def get_all_documents():
         return []
     finally:
         conn.close()
-
 
 def get_document_info(doc_id: int):
     """Получает информацию о документе (название, тип, содержание)"""
@@ -60,10 +48,8 @@ def get_document_info(doc_id: int):
     finally:
         conn.close()
 
-
 class RussianNER:
     """Класс для извлечения именованных сущностей из русских текстов"""
-
     def __init__(self):
         # Стоп-слова для фильтрации
         self.stop_words = {
@@ -83,7 +69,6 @@ class RussianNER:
             'под', 'при', 'про', 'с', 'со', 'у', 'через', 'в', 'на', 'с', 'по', 'к', 'у', 'от', 'из',
             'года', 'год', 'лет', 'месяц', 'день', 'ночь', 'утро', 'вечер'
         }
-
         # Список слов-маркеров для имен
         self.person_markers = {
             'профессор', 'доцент', 'преподаватель', 'ректор', 'декан', 'заведующий',
@@ -94,7 +79,6 @@ class RussianNER:
             'полковник', 'майор', 'капитан', 'сержант', 'солдат', 'офицер',
             'студент', 'аспирант', 'выпускник', 'преподаватель'
         }
-
         # Слова-маркеры для организаций
         self.org_markers = {
             'институт', 'университет', 'академия', 'школа', 'колледж',
