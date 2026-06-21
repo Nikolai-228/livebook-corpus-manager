@@ -22,7 +22,7 @@ CHAPTERS = [
 ]
 
 # PostgreSQL
-DATABASE_DSN = "postgresql://postgres:228228@localhost:5432/test_book"
+DATABASE_DSN = "postgresql://postgres:password@localhost:5432/test_book"
 
 # Chandra OCR настройки
 CHANDRA_METHOD = "hf"
