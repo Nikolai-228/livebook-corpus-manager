@@ -2,17 +2,23 @@ import psycopg2
 import re
 from collections import defaultdict, Counter
 import json
+from pymorphy3 import MorphAnalyzer
+from concurrent.futures import ThreadPoolExecutor
+import time
+
 # Подключение к БД
 from db_connection import connect_db, DB_CONFIG
 
+
 def get_all_documents():
-    """Получает все документы с оригинальным текстом"""
+    """Получает все документы с оригинальным и лемматизированным текстом"""
     conn = connect_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT d.id, d.title, d.type, d.content
+                SELECT d.id, d.title, d.type, d.content, dl.content
                 FROM documents d
+                LEFT JOIN documents_lemmatized dl ON d.id = dl.id_documents
                 WHERE d.content IS NOT NULL AND d.content != ''
                 ORDER BY d.id
             """)
@@ -24,22 +30,25 @@ def get_all_documents():
     finally:
         conn.close()
 
+
 def get_document_info(doc_id: int):
-    """Получает информацию о документе (название, тип, содержание)"""
+    """Получает информацию о документе (название, тип, содержание, лемматизированное)"""
     conn = connect_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT title, content, type
-                FROM documents 
-                WHERE id = %s
+                SELECT d.title, d.content, d.type, dl.content
+                FROM documents d
+                LEFT JOIN documents_lemmatized dl ON d.id = dl.id_documents
+                WHERE d.id = %s
             """, (doc_id,))
             result = cur.fetchone()
             if result:
                 return {
                     'title': result[0],
                     'content': result[1],
-                    'type': result[2]
+                    'type': result[2],
+                    'lemmatized': result[3]
                 }
             return None
     except Exception as e:
@@ -48,8 +57,75 @@ def get_document_info(doc_id: int):
     finally:
         conn.close()
 
+
+def get_entity_lemma(entity: str, morph) -> str:
+    """Получает лемму для сущности (кэшируется)"""
+    if not hasattr(get_entity_lemma, 'cache'):
+        get_entity_lemma.cache = {}
+
+    if entity in get_entity_lemma.cache:
+        return get_entity_lemma.cache[entity]
+
+    try:
+        words = entity.split()
+        lemmatized_words = []
+        for word in words:
+            clean_word = re.sub(r'[^\w]', '', word)
+            if clean_word:
+                parsed = morph.parse(clean_word)[0]
+                lemmatized_words.append(parsed.normal_form)
+            else:
+                lemmatized_words.append(word)
+        result = ' '.join(lemmatized_words)
+        get_entity_lemma.cache[entity] = result
+        return result
+    except:
+        get_entity_lemma.cache[entity] = entity
+        return entity
+
+
+def find_entity_contexts_all(text: str, entity: str, morph, context_size: int = 70) -> list:
+    """
+    Находит ВСЕ контексты для сущности в оригинальном тексте
+    """
+    contexts = []
+    text_lower = text.lower()
+    entity_lower = entity.lower()
+
+    # Прямой поиск
+    pos = 0
+    while True:
+        found = text_lower.find(entity_lower, pos)
+        if found == -1:
+            break
+        start = max(0, found - context_size)
+        end = min(len(text), found + len(entity) + context_size)
+        context = text[start:end].replace('\n', ' ')
+        contexts.append(context)
+        pos = found + 1
+
+    # Если ничего не найдено, пробуем поиск по лемме
+    if not contexts and len(entity.split()) > 1:
+        entity_lemma = get_entity_lemma(entity, morph)
+        if entity_lemma != entity:
+            pos = 0
+            while True:
+                found = text_lower.find(entity_lemma.lower(), pos)
+                if found == -1:
+                    break
+                start = max(0, found - context_size)
+                end = min(len(text), found + len(entity_lemma) + context_size)
+                context = text[start:end].replace('\n', ' ')
+                if context not in contexts:
+                    contexts.append(context)
+                pos = found + 1
+
+    return contexts
+
+
 class RussianNER:
     """Класс для извлечения именованных сущностей из русских текстов"""
+
     def __init__(self):
         # Стоп-слова для фильтрации
         self.stop_words = {
@@ -90,22 +166,25 @@ class RussianNER:
             'организация', 'учреждение', 'НИИ', 'КБ', 'ООО', 'ЗАО', 'ОАО', 'ПАО'
         }
 
+        # Компилируем регулярные выражения заранее для скорости
+        self.pattern_person = re.compile(r'\b([А-Я][а-я]{2,}(?:\s+[А-Я][а-я]{2,}){1,2})\b')
+        self.pattern_initials = re.compile(r'\b([А-Я]\.\s*[А-Я]\.\s*[А-Я][а-я]{2,})\b')
+        self.pattern_initials_rev = re.compile(r'\b([А-Я][а-я]{2,}\s+[А-Я]\.\s*[А-Я]\.)\b')
+        self.pattern_abbr = re.compile(r'\b([А-Я]{2,}(?:\s*[А-Я]{2,})*)\b')
+        self.pattern_quotes = re.compile(r'["«]([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)["»]')
+        self.pattern_caps = re.compile(r'\b([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+){1,3})\b')
+        self.pattern_location_short = re.compile(r'\b(?:г\.|ул\.|пр\.)\s+([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\b')
+
     def extract_persons(self, text: str) -> list:
         """Извлечение имен людей из текста"""
         persons = set()
 
-        # Паттерн 1: Имя + Фамилия (с возможным отчеством)
-        # Ищем слова с заглавной буквы, идущие подряд
-        pattern1 = r'\b([А-Я][а-я]{2,}(?:\s+[А-Я][а-я]{2,}){1,2})\b'
-        matches = re.findall(pattern1, text)
-
+        # Паттерн 1: Имя + Фамилия
+        matches = self.pattern_person.findall(text)
         for match in matches:
-            # Проверяем, что это не организация и не стоп-слово
             words = match.split()
             if len(words) >= 2 and len(words) <= 3:
-                # Проверяем, что все слова начинаются с заглавной
                 if all(w[0].isupper() and w[0] != 'И' for w in words):
-                    # Проверяем, что это не организация
                     is_org = False
                     for marker in self.org_markers:
                         if marker in match.lower():
@@ -114,93 +193,83 @@ class RussianNER:
                     if not is_org:
                         persons.add(match)
 
-        # Паттерн 2: Инициалы + Фамилия (И.И. Иванов)
-        pattern2 = r'\b([А-Я]\.\s*[А-Я]\.\s*[А-Я][а-я]{2,})\b'
-        matches = re.findall(pattern2, text)
-        for match in matches:
-            persons.add(match)
+        # Паттерн 2: Инициалы + Фамилия
+        matches = self.pattern_initials.findall(text)
+        persons.update(matches)
 
-        # Паттерн 3: Фамилия + Инициалы (Иванов И.И.)
-        pattern3 = r'\b([А-Я][а-я]{2,}\s+[А-Я]\.\s*[А-Я]\.)\b'
-        matches = re.findall(pattern3, text)
-        for match in matches:
-            persons.add(match)
+        # Паттерн 3: Фамилия + Инициалы
+        matches = self.pattern_initials_rev.findall(text)
+        persons.update(matches)
 
         # Паттерн 4: Слово-маркер + Имя Фамилия
         for marker in self.person_markers:
-            pattern4 = rf'\b{marker}\s+([А-Я][а-я]{{2,}}(?:\s+[А-Я][а-я]{{2,}}){{1,2}})\b'
-            matches = re.findall(pattern4, text, re.IGNORECASE)
+            pattern = re.compile(rf'\b{marker}\s+([А-Я][а-я]{{2,}}(?:\s+[А-Я][а-я]{{2,}}){{1,2}})\b', re.IGNORECASE)
+            matches = pattern.findall(text)
             for match in matches:
                 if len(match.split()) >= 2:
                     persons.add(match)
 
-        # Паттерн 5: Имя Фамилия после слов "товарищ", "гражданин" и т.д.
-        pattern5 = r'\b(?:товарищ|гражданин|господин)\s+([А-Я][а-я]{2,}\s+[А-Я][а-я]{2,})\b'
-        matches = re.findall(pattern5, text, re.IGNORECASE)
-        for match in matches:
-            persons.add(match)
+        # Паттерн 5: после слов "товарищ", "гражданин"
+        pattern = re.compile(r'\b(?:товарищ|гражданин|господин)\s+([А-Я][а-я]{2,}\s+[А-Я][а-я]{2,})\b', re.IGNORECASE)
+        matches = pattern.findall(text)
+        persons.update(matches)
 
-        # Фильтруем слишком короткие или подозрительные имена
-        filtered_persons = set()
-        for person in persons:
-            words = person.split()
-            # Проверяем длину слов
-            if all(2 <= len(w) <= 20 for w in words):
-                # Проверяем, что это не название организации
-                is_org = False
-                for marker in self.org_markers:
-                    if marker in person.lower():
-                        is_org = True
-                        break
-                if not is_org:
-                    filtered_persons.add(person)
-
-        return list(filtered_persons)
+        return list(persons)
 
     def extract_organizations(self, text: str) -> list:
         """Извлечение названий организаций"""
         organizations = set()
 
-        # Паттерн 1: Название с маркером организации
+        # Паттерн 1: С маркером организации
         for marker in self.org_markers:
-            # Ищем маркер + название (с заглавной буквы)
-            pattern1 = rf'\b{marker}\s+([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\b'
-            matches = re.findall(pattern1, text, re.IGNORECASE)
+            pattern1 = re.compile(rf'\b{marker}\s+([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\b', re.IGNORECASE)
+            matches = pattern1.findall(text)
             for match in matches:
-                if len(match) > 2:
-                    full_name = f"{marker} {match}"
-                    organizations.add(full_name)
+                if len(match) > 1:
+                    organizations.add(f"{marker} {match}")
+                    if len(match) > 3:
+                        organizations.add(match)
 
-            # Ищем название + маркер
-            pattern2 = rf'\b([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\s+{marker}\b'
-            matches = re.findall(pattern2, text, re.IGNORECASE)
+            pattern2 = re.compile(rf'\b([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\s+{marker}\b', re.IGNORECASE)
+            matches = pattern2.findall(text)
             for match in matches:
-                if len(match) > 2:
-                    full_name = f"{match} {marker}"
-                    organizations.add(full_name)
+                if len(match) > 1:
+                    organizations.add(f"{match} {marker}")
+                    if len(match) > 3:
+                        organizations.add(match)
 
         # Паттерн 2: Аббревиатуры
-        pattern3 = r'\b([А-Я]{2,}(?:\s*[А-Я]{2,})*)\b'
-        matches = re.findall(pattern3, text)
+        matches = self.pattern_abbr.findall(text)
         for match in matches:
             if len(match) >= 2 and match not in self.stop_words:
                 organizations.add(match)
 
         # Паттерн 3: Названия в кавычках
-        pattern4 = r'["«]([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)["»]'
-        matches = re.findall(pattern4, text)
+        matches = self.pattern_quotes.findall(text)
         for match in matches:
             if len(match) > 2:
-                # Проверяем, что это не имя человека
                 is_person = False
                 words = match.split()
                 if len(words) >= 2 and all(w[0].isupper() for w in words):
-                    # Проверяем по маркерам
                     for marker in self.person_markers:
                         if marker in match.lower():
                             is_person = True
                             break
                 if not is_person:
+                    organizations.add(match)
+
+        # Паттерн 4: Слова с большой буквы
+        matches = self.pattern_caps.findall(text)
+        for match in matches:
+            words = match.split()
+            if all(w[0].isupper() for w in words):
+                is_person = False
+                for marker in self.person_markers:
+                    if marker in match.lower():
+                        is_person = True
+                        break
+                is_stop = any(w.lower() in self.stop_words for w in words)
+                if not is_person and not is_stop and len(match) > 3:
                     organizations.add(match)
 
         return list(organizations)
@@ -209,7 +278,6 @@ class RussianNER:
         """Извлечение географических названий"""
         locations = set()
 
-        # Паттерн 1: С маркером места
         location_markers = {
             'город', 'поселок', 'деревня', 'село', 'район', 'край',
             'область', 'республика', 'улица', 'проспект', 'площадь',
@@ -218,15 +286,13 @@ class RussianNER:
         }
 
         for marker in location_markers:
-            pattern = rf'\b{marker}\s+([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\b'
-            matches = re.findall(pattern, text, re.IGNORECASE)
+            pattern = re.compile(rf'\b{marker}\s+([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\b', re.IGNORECASE)
+            matches = pattern.findall(text)
             for match in matches:
                 if len(match) > 2:
                     locations.add(f"{marker} {match}")
 
-        # Паттерн 2: Сокращения (г., ул., пр.)
-        pattern2 = r'\b(?:г\.|ул\.|пр\.)\s+([А-Я][а-яА-Я\-]+(?:\s+[А-Я][а-яА-Я\-]+)*)\b'
-        matches = re.findall(pattern2, text)
+        matches = self.pattern_location_short.findall(text)
         for match in matches:
             if len(match) > 2:
                 locations.add(match)
@@ -243,7 +309,6 @@ class RussianNER:
             r'\d{4}[\-]\d{2}[\-]\d{2}',
             r'\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)',
             r'\d{4}\s+год(?:а)?',
-            r'(?:в|с|до|после|начиная\s+с)\s+\d{4}\s+год(?:а)?',
         ]
 
         for pattern in patterns:
@@ -302,28 +367,7 @@ class RussianNER:
             'PERCENT': self.extract_percents(text)
         }
 
-        # Удаляем пустые списки
         return {k: v for k, v in entities.items() if v}
-
-
-def find_entity_contexts(text: str, entity: str, context_size: int = 70) -> list:
-    """Находит все контексты для сущности в тексте"""
-    contexts = []
-    text_lower = text.lower()
-    entity_lower = entity.lower()
-    pos = 0
-
-    while True:
-        found = text_lower.find(entity_lower, pos)
-        if found == -1:
-            break
-        start = max(0, found - context_size)
-        end = min(len(text), found + len(entity) + context_size)
-        context = text[start:end].replace('\n', ' ')
-        contexts.append(context)
-        pos = found + 1
-
-    return contexts
 
 
 def extract_entities_from_document(doc_id: int, top_n: int = 20):
@@ -350,13 +394,17 @@ def extract_entities_from_document(doc_id: int, top_n: int = 20):
     print(f"   Размер текста: {len(doc_info['content'])} символов")
 
     print(f"\n🔄 Извлечение сущностей...")
+    start_time = time.time()
 
+    morph = MorphAnalyzer()
     ner = RussianNER()
     entities = ner.extract_all(doc_info['content'])
 
     if not entities:
         print("\n❌ Сущности не найдены")
         return
+
+    print(f"   ⏱️ Извлечение заняло {time.time() - start_time:.2f} сек.")
 
     print(f"\n📊 НАЙДЕННЫЕ СУЩНОСТИ:")
     print(f"{'─' * 70}")
@@ -378,30 +426,42 @@ def extract_entities_from_document(doc_id: int, top_n: int = 20):
             print(f"\n📌 {type_name}:")
             print(f"   Найдено: {len(entity_list)}")
 
+            # Сортируем по частоте
             entity_freq = {}
+            entity_lemmas = {}
             for entity in entity_list:
-                contexts = find_entity_contexts(doc_info['content'], entity)
+                lemma = get_entity_lemma(entity, morph)
+                entity_lemmas[entity] = lemma
+                contexts = find_entity_contexts_all(doc_info['content'], entity, morph, 70)
                 entity_freq[entity] = len(contexts)
 
             sorted_entities = sorted(entity_freq.items(), key=lambda x: x[1], reverse=True)
 
             for i, (entity, freq) in enumerate(sorted_entities[:top_n], 1):
-                contexts = find_entity_contexts(doc_info['content'], entity)
+                lemma = entity_lemmas.get(entity, entity)
+                contexts = find_entity_contexts_all(doc_info['content'], entity, morph, 70)
 
-                print(f"\n   {i:2d}. \"{entity}\"")
+                print(f"\n   {i:2d}. Лемма: \"{lemma}\"")
+                print(f"       Исходная форма: \"{entity}\"")
                 print(f"       Частота: {freq} раз(а)")
+                print(f"       Всего контекстов: {len(contexts)}")
+
+                if len(contexts) == freq:
+                    print(f"       ✅ Количество контекстов соответствует частоте")
+                else:
+                    print(f"       ⚠️ Количество контекстов ({len(contexts)}) не совпадает с частотой ({freq})")
 
                 if contexts:
-                    print(f"       Контексты:")
-                    for j, ctx in enumerate(contexts[:2], 1):
+                    print(f"       ВСЕ КОНТЕКСТЫ (в оригинальном тексте):")
+                    for j, ctx in enumerate(contexts, 1):
                         ctx_clean = re.sub(r'\s+', ' ', ctx)
-                        highlighted = ctx_clean.replace(
-                            entity,
-                            f"***{entity}***"
-                        )
-                        print(f"         {j}. ...{highlighted[:150]}...")
-                    if len(contexts) > 2:
-                        print(f"         ... и еще {len(contexts) - 2} контекстов")
+                        # Ограничиваем длину контекста для читаемости
+                        if len(ctx_clean) > 200:
+                            print(f"         {j}. ...{ctx_clean[:200]}...")
+                        else:
+                            print(f"         {j}. ...{ctx_clean}...")
+                else:
+                    print("       Контексты не найдены")
 
             total_entities += len(entity_list)
 
@@ -425,24 +485,31 @@ def extract_entities_all_documents(top_n_per_doc: int = 20, top_n_total: int = 3
 
     all_entities = defaultdict(list)
     ner = RussianNER()
+    morph = MorphAnalyzer()
 
     print(f"\n📊 ОБРАБОТКА ДОКУМЕНТОВ:")
     print(f"{'─' * 70}")
 
-    for doc_id, title, doc_type, content in documents:
+    processed = 0
+    start_time = time.time()
+
+    for doc_id, title, doc_type, content, lemmatized in documents:
         if not content:
             continue
 
-        print(f"\n📄 Обработка: {title[:50] if title else 'Без названия'} (ID: {doc_id})")
+        processed += 1
+        if processed % 10 == 0:
+            print(f"   Обработано {processed} документов...")
 
         entities = ner.extract_all(content)
 
         if entities:
             for entity_type, entity_list in entities.items():
-                all_entities[entity_type].extend(entity_list)
-            print(f"   ✅ Найдено сущностей: {sum(len(e) for e in entities.values())}")
-        else:
-            print(f"   ⚠️ Сущности не найдены")
+                for entity in entity_list:
+                    lemma = get_entity_lemma(entity, morph)
+                    all_entities[entity_type].append(lemma)
+
+    print(f"\n   ⏱️ Обработка {processed} документов заняла {time.time() - start_time:.2f} сек.")
 
     if not all_entities:
         print("\n❌ Сущности не найдены ни в одном документе")
@@ -495,7 +562,7 @@ def show_documents_list():
     print(f"\n{'ID':<6} {'Тип':<12} {'Название'}")
     print(f"{'─' * 70}")
 
-    for doc_id, title, doc_type, _ in documents:
+    for doc_id, title, doc_type, _, _ in documents:
         title_short = title[:50] if title else "Без названия"
         doc_type_short = doc_type[:10] if doc_type else "Не указан"
         print(f"{doc_id:<6} {doc_type_short:<12} {title_short}")
