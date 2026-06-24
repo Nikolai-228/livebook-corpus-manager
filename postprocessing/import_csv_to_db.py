@@ -1,4 +1,3 @@
-# postprocessing/import_csv_to_db.py
 """
 Импорт данных из CSV файла обратно в таблицу documents
 Обновляет content для PDF документов на основе ID
@@ -7,6 +6,9 @@
 import sys
 import csv
 from pathlib import Path
+
+# Укажите путь к CSV файлу здесь
+DEFAULT_CSV_PATH = "D:\practica\livebook-corpus-manager\exports\pdf_deep.csv"
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -19,16 +21,13 @@ except ImportError:
     from config import DATABASE_DSN
 
 
-def import_csv_to_db(csv_path, dry_run=False, update_content=True, update_title=False):
-    """
-    Импортирует данные из CSV в таблицу documents
+def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_title=False):
+    """Импортирует данные из CSV в таблицу documents"""
 
-    Args:
-        csv_path: Путь к CSV файлу
-        dry_run: Если True, только показывает что будет сделано
-        update_content: Обновлять ли поле content
-        update_title: Обновлять ли поле title
-    """
+    # Используем путь по умолчанию, если не указан
+    if csv_path is None:
+        csv_path = DEFAULT_CSV_PATH
+
     csv_path = Path(csv_path)
 
     print("=" * 70)
@@ -185,7 +184,16 @@ def import_csv_to_db(csv_path, dry_run=False, update_content=True, update_title=
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Импорт данных из CSV в БД')
-    parser.add_argument('csv_file', type=str, help='Путь к CSV файлу')
+
+    # Делаем csv_file необязательным (nargs='?') и задаем значение по умолчанию
+    parser.add_argument(
+        'csv_file',
+        type=str,
+        nargs='?',  # <-- ВОПРОСИТЕЛЬНЫЙ ЗНАК делает аргумент необязательным
+        default=DEFAULT_CSV_PATH,  # <-- Ваша константа
+        help='Путь к CSV файлу (по умолчанию: %(default)s)'
+    )
+
     parser.add_argument('--dry-run', action='store_true', help='Пробный запуск без сохранения')
     parser.add_argument('--no-content', action='store_true', help='Не обновлять поле content')
     parser.add_argument('--update-title', action='store_true', help='Обновлять поле title')
