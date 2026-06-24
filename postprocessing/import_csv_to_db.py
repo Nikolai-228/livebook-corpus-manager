@@ -1,6 +1,6 @@
 """
 Импорт данных из CSV файла обратно в таблицу documents
-Обновляет content для PDF документов на основе ID
+Обновляет content для PDF документов на основе URL
 """
 
 import sys
@@ -22,7 +22,7 @@ except ImportError:
 
 
 def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_title=False):
-    """Импортирует данные из CSV в таблицу documents"""
+    """Импортирует данные из CSV в таблицу documents по URL"""
 
     # Используем путь по умолчанию, если не указан
     if csv_path is None:
@@ -31,7 +31,7 @@ def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_t
     csv_path = Path(csv_path)
 
     print("=" * 70)
-    print("📥 ИМПОРТ ДАННЫХ ИЗ CSV В ТАБЛИЦУ DOCUMENTS")
+    print("📥 ИМПОРТ ДАННЫХ ИЗ CSV В ТАБЛИЦУ DOCUMENTS (ПО URL)")
     print("=" * 70)
     print(f"📄 Файл: {csv_path}")
 
@@ -58,48 +58,55 @@ def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_t
         headers = next(reader)
 
         # Проверяем, какие колонки есть в файле
-        has_id = 'id' in headers
+        has_url = 'url' in headers
         has_content = 'content' in headers
+        has_title = 'title' in headers
 
-
-        if not has_id:
-            print("❌ В CSV нет колонки 'id' - невозможно определить, какие документы обновлять")
+        if not has_url:
+            print("❌ В CSV нет колонки 'url' - невозможно определить, какие документы обновлять")
             conn.close()
             return
 
-        if not has_content:
+        if not has_content and not has_title:
             print("❌ В CSV нет колонок 'content' или 'title' - нечего обновлять")
             conn.close()
             return
 
         print(f"\n📋 Обнаружены колонки:")
-        print(f"   ID: {'✅' if has_id else '❌'}")
+        print(f"   URL: {'✅' if has_url else '❌'}")
         print(f"   content: {'✅' if has_content else '❌'}")
-
+        print(f"   title: {'✅' if has_title else '❌'}")
 
         # Читаем все строки
         rows = list(reader)
 
         # Получаем индексы
-        id_idx = headers.index('id')
+        url_idx = headers.index('url')
         content_idx = headers.index('content') if has_content else -1
-
+        title_idx = headers.index('title') if has_title else -1
 
         print(f"\n📊 Найдено строк: {len(rows)}")
+
+        # Проверяем, есть ли дубликаты URL
+        urls = [row[url_idx] for row in rows if row[url_idx]]
+        unique_urls = len(set(urls))
+        if len(urls) != unique_urls:
+            print(f"⚠️ ВНИМАНИЕ: Обнаружено {len(urls) - unique_urls} дубликатов URL")
 
     if dry_run:
         # Показываем первые 5 строк для примера
         print("\n📋 ПРИМЕРЫ ДАННЫХ ДЛЯ ИМПОРТА (первые 5):")
         print("-" * 70)
         for i, row in enumerate(rows[:5]):
-            doc_id = row[id_idx]
-            content_preview = row[content_idx][:100] + "..." if has_content and len(row[content_idx]) > 100 else row[
-                content_idx] if has_content else "N/A"
+            url = row[url_idx]
+            content_preview = row[content_idx][:100] + "..." if has_content and len(row[content_idx]) > 100 else row[content_idx] if has_content else "N/A"
 
-            print(f"   ID: {doc_id}")
+            print(f"   URL: {url}")
             if has_content:
                 print(f"   content: {content_preview}")
-
+            if has_title:
+                print(f"   title: {row[title_idx][:50]}")
+            print()
 
         print("\n⚠️ DRY RUN: изменения не будут применены")
         print("   Убери флаг --dry-run для реального импорта")
@@ -120,25 +127,53 @@ def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_t
     with tqdm(total=stats['total'], desc="Импорт", unit="док") as pbar:
         for row in rows:
             try:
-                doc_id = int(row[id_idx])
+                url = row[url_idx]
 
-                # Проверяем, существует ли документ
-                cursor.execute("SELECT id FROM documents WHERE id = %s", (doc_id,))
-                if not cursor.fetchone():
+                if not url:
+                    stats['errors'] += 1
+                    pbar.update(1)
+                    continue
+
+                # Проверяем, существует ли документ с таким URL
+                cursor.execute("SELECT id FROM documents WHERE url = %s", (url,))
+                result = cursor.fetchone()
+
+                if not result:
                     stats['not_found'] += 1
                     pbar.update(1)
                     continue
+
+                doc_id = result[0]
+
+                # Собираем поля для обновления
+                update_fields = []
+                update_values = []
 
                 # Обновляем content
                 if update_content and has_content and content_idx != -1:
                     new_content = row[content_idx]
                     if new_content and new_content != '':
-                        cursor.execute("""
-                            UPDATE documents SET content = %s WHERE id = %s
-                        """, (new_content, doc_id))
+                        update_fields.append("content = %s")
+                        update_values.append(new_content)
                         stats['updated_content'] += 1
 
+                # Обновляем title
+                if update_title and has_title and title_idx != -1:
+                    new_title = row[title_idx]
+                    if new_title and new_title != '':
+                        update_fields.append("title = %s")
+                        update_values.append(new_title)
+                        stats['updated_title'] += 1
 
+                # Если есть что обновлять
+                if update_fields:
+                    update_values.append(doc_id)
+                    query = f"""
+                        UPDATE documents 
+                        SET {', '.join(update_fields)} 
+                        WHERE id = %s
+                    """
+                    cursor.execute(query, tuple(update_values))
 
                 # Периодический коммит
                 if (stats['updated_content'] + stats['updated_title']) % 100 == 0:
@@ -146,12 +181,13 @@ def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_t
 
             except Exception as e:
                 stats['errors'] += 1
-                print(f"\n❌ Ошибка при обработке ID {doc_id}: {e}")
+                print(f"\n❌ Ошибка при обработке URL {url}: {e}")
 
             pbar.update(1)
             pbar.set_postfix({
                 'content': stats['updated_content'],
                 'title': stats['updated_title'],
+                'не найдено': stats['not_found'],
                 'ошибки': stats['errors']
             })
 
@@ -183,14 +219,13 @@ def import_csv_to_db(csv_path=None, dry_run=False, update_content=True, update_t
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Импорт данных из CSV в БД')
+    parser = argparse.ArgumentParser(description='Импорт данных из CSV в БД по URL')
 
-    # Делаем csv_file необязательным (nargs='?') и задаем значение по умолчанию
     parser.add_argument(
         'csv_file',
         type=str,
-        nargs='?',  # <-- ВОПРОСИТЕЛЬНЫЙ ЗНАК делает аргумент необязательным
-        default=DEFAULT_CSV_PATH,  # <-- Ваша константа
+        nargs='?',
+        default=DEFAULT_CSV_PATH,
         help='Путь к CSV файлу (по умолчанию: %(default)s)'
     )
 
