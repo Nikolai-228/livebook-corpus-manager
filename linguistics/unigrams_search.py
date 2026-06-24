@@ -167,7 +167,7 @@ def get_lemmatized_text(doc_id: int):
 
 
 def get_all_documents_with_lemmas():
-    """Получает все документы с лемматизированным текстом"""
+    """Получает все документы с лемматизированным текстом и оригинальным содержимым"""
     conn = connect_db()
     try:
         with conn.cursor() as cur:
@@ -212,8 +212,10 @@ def lemmatize_text(text: str, morph) -> list:
     return lemmas
 
 
-def find_all_contexts(text: str, word: str, context_size: int = 70) -> list:
-    """Находит все контексты для слова в тексте"""
+def find_all_contexts_original(text: str, word: str, context_size: int = 70) -> list:
+    """
+    Находит все контексты для слова в оригинальном тексте
+    """
     contexts = []
     text_lower = text.lower()
     pos = 0
@@ -231,21 +233,46 @@ def find_all_contexts(text: str, word: str, context_size: int = 70) -> list:
     return contexts
 
 
+def find_all_contexts_by_lemma(text: str, lemma: str, morph, context_size: int = 70) -> list:
+    """
+    Находит все контексты для леммы в оригинальном тексте
+    Ищет все возможные формы слова
+    """
+    contexts = set()  # Используем set для уникальности
+    text_lower = text.lower()
+
+    # Получаем все формы слова
+    try:
+        parsed = morph.parse(lemma)[0]
+        # Все формы слова (разные падежи, числа и т.д.)
+        word_forms = [form.word for form in parsed.lexeme]
+        # Добавляем саму лемму
+        if lemma not in word_forms:
+            word_forms.append(lemma)
+    except Exception:
+        word_forms = [lemma]
+
+    # Ищем каждую форму в тексте
+    for form in word_forms:
+        form_lower = form.lower()
+        pos = 0
+        while True:
+            found = text_lower.find(form_lower, pos)
+            if found == -1:
+                break
+            start = max(0, found - context_size)
+            end = min(len(text), found + len(form) + context_size)
+            context = text[start:end].replace('\n', ' ')
+            contexts.add(context)
+            pos = found + 1
+
+    return list(contexts)
+
+
 def is_stop_word(word: str) -> bool:
     """Проверяет, является ли слово стоп-словом"""
     word_lower = word.lower()
     return word_lower in STOP_WORDS or len(word_lower) <= 2
-
-
-def filter_lemmas(lemmas_counter: Counter) -> Counter:
-    """
-    Фильтрует леммы, удаляя стоп-слова и слишком короткие слова
-    """
-    filtered = {}
-    for lemma, count in lemmas_counter.items():
-        if not is_stop_word(lemma):
-            filtered[lemma] = count
-    return Counter(filtered)
 
 
 def search_unigrams(search_word: str, limit: int = 20):
@@ -262,7 +289,7 @@ def search_unigrams(search_word: str, limit: int = 20):
             return
         search_lemma = search_lemma[0]
         print(f"🔑 Лемма для поиска: '{search_lemma}'")
-        # Получаем все документы с лемматизированным текстом
+        # Получаем все документы с лемматизированным текстом и оригиналом
         documents = get_all_documents_with_lemmas()
         if not documents:
             print("❌ Нет документов с лемматизированным текстом")
@@ -280,16 +307,17 @@ def search_unigrams(search_word: str, limit: int = 20):
             freq = lemmas_list.count(search_lemma)
 
             if freq > 0:
-                # Находим ВСЕ контексты в оригинальном тексте
-                contexts = find_all_contexts(original_content, search_word, 70)
+                # Находим ВСЕ контексты в ОРИГИНАЛЬНОМ тексте по лемме
+                contexts = find_all_contexts_by_lemma(original_content, search_lemma, morph, 70)
 
-                # Важно: количество контекстов должно совпадать с частотой
+                # Если контекстов меньше, пробуем прямой поиск
                 if len(contexts) < freq:
-                    lemm_contexts = find_all_contexts(original_content, search_lemma, 70)
-                    for ctx in lemm_contexts:
+                    direct_contexts = find_all_contexts_original(original_content, search_word, 70)
+                    for ctx in direct_contexts:
                         if ctx not in contexts:
                             contexts.append(ctx)
 
+                # Обрезаем до частоты, если контекстов больше
                 contexts = contexts[:freq]
 
                 results.append({
@@ -372,26 +400,26 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
 
         print(f"\n📊 ТОП-{top_n} САМЫХ ЧАСТЫХ УНИГРАММ (ЛЕММ):")
         print(f"   (стоп-слова и короткие слова удалены)")
+        print(f"   (контексты показаны в оригинальном виде)")
         print(f"{'─' * 60}")
 
+        morph = MorphAnalyzer()
+
         for i, (lemma, freq) in enumerate(top_lemmas, 1):
+            # Находим ВСЕ контексты в ОРИГИНАЛЬНОМ тексте по лемме
             contexts = []
             if doc_info['content']:
-                contexts = find_all_contexts(doc_info['content'], lemma, 60)
+                # Ищем все формы слова в оригинальном тексте
+                contexts = find_all_contexts_by_lemma(doc_info['content'], lemma, morph, 60)
 
+                # Если контекстов меньше, пробуем прямой поиск леммы
                 if len(contexts) < freq:
-                    morph = MorphAnalyzer()
-                    try:
-                        parsed = morph.parse(lemma)[0]
-                        for form in parsed.lexeme:
-                            if form.word != lemma:
-                                more_contexts = find_all_contexts(doc_info['content'], form.word, 60)
-                                for ctx in more_contexts:
-                                    if ctx not in contexts:
-                                        contexts.append(ctx)
-                    except Exception:
-                        pass
+                    direct_contexts = find_all_contexts_original(doc_info['content'], lemma, 60)
+                    for ctx in direct_contexts:
+                        if ctx not in contexts:
+                            contexts.append(ctx)
 
+            # Обрезаем до частоты, если контекстов больше
             contexts = contexts[:freq]
 
             print(f"\n{i:2d}. Лемма: \"{lemma}\"")
@@ -404,7 +432,7 @@ def get_top_unigrams_in_document(doc_id: int, top_n: int = 20):
                 print(f"    ⚠️ Количество контекстов ({len(contexts)}) не совпадает с частотой ({freq})")
 
             if contexts:
-                print(f"    Контексты:")
+                print(f"    Контексты (оригинальный текст):")
                 for j, ctx in enumerate(contexts, 1):
                     ctx_clean = re.sub(r'\s+', ' ', ctx)
                     print(f"      {j}. ...{ctx_clean[:150]}...")
@@ -455,6 +483,9 @@ def interactive_top_unigrams():
     print(f"\n{'=' * 60}")
     print("🏆 ВЫВОД ТОП-20 УНИГРАММ ПО ДОКУМЕНТУ")
     print(f"{'=' * 60}")
+    print("ℹ️  Леммы выводятся в нормальной форме")
+    print("ℹ️  Контексты показываются в оригинальном виде")
+    print("=" * 60)
 
     documents = show_documents_list()
 
