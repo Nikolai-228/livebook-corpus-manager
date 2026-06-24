@@ -10,7 +10,6 @@ from bs4 import BeautifulSoup
 from googleapiclient.http import MediaIoBaseDownload
 
 
-
 def extract_text_from_pdf(content_bytes):
     """
     Извлекает текст из PDF через PyMuPDF с простой, но эффективной пост-обработкой.
@@ -61,8 +60,6 @@ def extract_text_from_pdf(content_bytes):
         # Объединяем строки в текст
         page_text = ' '.join(cleaned_lines)
 
-
-
         # Дополнительная очистка от лишних пробелов
         page_text = re.sub(r'\s+', ' ', page_text)
 
@@ -76,7 +73,6 @@ def extract_text_from_pdf(content_bytes):
     result = clean_text_from_urls(result)
 
     return result
-
 
 
 def clean_text_from_urls(text):
@@ -115,32 +111,79 @@ def clean_text_from_urls(text):
 
 
 def extract_date_from_text(text):
-    """Извлекает дату из текста"""
+    """
+    Извлекает дату из текста (ищет в конце текста).
+    Возвращает дату в формате YYYY-MM-DD или None.
+    """
     if not text:
         return None
 
+    # Разбиваем текст на строки и ищем дату в последних строках
+    lines = text.split('\n')
+    # Проверяем последние 20 строк (или меньше)
+    check_lines = lines[-20:] if len(lines) > 20 else lines
+
+    # Собираем текст из последних строк для поиска
+    end_text = '\n'.join(check_lines)
+
+    # Паттерны для поиска даты (от более специфичных к менее)
     patterns = [
-        r'(?:дата|дата создания|создано|опубликовано|от)\s*:?\s*(\d{1,2})[\.\-/](\d{1,2})[\.\-/](\d{4})',
-        r'(?:дата|дата создания|создано|опубликовано|от)\s*:?\s*(\d{4})',
-        r'(\d{1,2})[\.\-/](\d{1,2})[\.\-/](\d{4})',
+        # Дата в формате ДД.ММ.ГГГГ или ДД/ММ/ГГГГ или ДД-ММ-ГГГГ
+        r'(\d{2})[\.\-/](\d{2})[\.\-/](\d{4})',
+        # Дата с месяцем прописью: 17 апреля 2014
+        r'(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(\d{4})',
+        # Дата: 17.04.2014
+        r'(\d{2})\.(\d{2})\.(\d{4})',
+        # Год: 2014
         r'(\d{4})',
     ]
 
-    found_dates = []
+    months = {
+        'января': '01', 'февраля': '02', 'марта': '03', 'апреля': '04',
+        'мая': '05', 'июня': '06', 'июля': '07', 'августа': '08',
+        'сентября': '09', 'октября': '10', 'ноября': '11', 'декабря': '12'
+    }
+
+    # Ищем дату в последних строках
+    for pattern in patterns:
+        matches = re.findall(pattern, end_text)
+        if matches:
+            # Берем последнее совпадение
+            match = matches[-1]
+            if len(match) == 3:
+                # Проверяем, если первая часть - год (4 цифры)
+                if len(match[0]) == 4:
+                    year, month, day = match
+                    return f"{year}-{int(month):02d}-{int(day):02d}"
+                elif match[1] in months:  # Месяц прописью
+                    day, month_name, year = match
+                    month = months[month_name]
+                    return f"{year}-{month}-{int(day):02d}"
+                else:
+                    day, month, year = match
+                    return f"{year}-{int(month):02d}-{int(day):02d}"
+            elif len(match) == 1 and len(match[0]) == 4:
+                return f"{match[0]}-01-01"
+
+    # Если не нашли в конце, ищем во всем тексте
     for pattern in patterns:
         matches = re.findall(pattern, text)
-        for match in matches:
+        if matches:
+            match = matches[-1]
             if len(match) == 3:
                 if len(match[0]) == 4:
                     year, month, day = match
+                    return f"{year}-{int(month):02d}-{int(day):02d}"
+                elif match[1] in months:
+                    day, month_name, year = match
+                    month = months[month_name]
+                    return f"{year}-{month}-{int(day):02d}"
                 else:
                     day, month, year = match
-                found_dates.append(f"{year}-{int(month):02d}-{int(day):02d}")
+                    return f"{year}-{int(month):02d}-{int(day):02d}"
             elif len(match) == 1 and len(match[0]) == 4:
-                found_dates.append(f"{match[0]}-01-01")
+                return f"{match[0]}-01-01"
 
-    if found_dates:
-        return found_dates[-1]
     return None
 
 
@@ -245,39 +288,45 @@ def extract_text_from_other(content_bytes, mime_type):
 
 
 def extract_text_and_images(drive_service, file_metadata, content_bytes=None):
-    """Главная функция: извлекает текст и изображения из файла"""
+    """
+    Главная функция: извлекает текст и изображения из файла.
+    Возвращает (text, images, date)
+    """
     mime_type = file_metadata.get('mimeType', '')
     file_id = file_metadata['id']
     file_name = file_metadata.get('name', 'unknown')
 
     text = ""
     images = []
+    date = None
 
-    # PDF - используем Chandra OCR [citation:1][citation:9]
+    # PDF - используем PyMuPDF
     if mime_type == 'application/pdf':
-        print(f"    📑 PDF (Chandra OCR): {file_name}")
+        print(f"    📑 PDF: {file_name}")
 
         if content_bytes is None:
             content_bytes = download_file_content_with_service(drive_service, file_id)
 
         if content_bytes:
             text = extract_text_from_pdf(content_bytes)
+            date = extract_date_from_text(text)
         else:
             text = ""
 
-        return text, []
+        return text, [], date
 
     # Google Docs
     if mime_type == 'application/vnd.google-apps.document':
         print(f"    📄 Google Doc: {file_name}")
         text, images = extract_text_and_images_from_google_doc(drive_service, file_id)
-        return text, images
+        date = extract_date_from_text(text)
+        return text, images, date
 
     # Скачиваем файл для остальных типов
     if content_bytes is None:
         content_bytes = download_file_content_with_service(drive_service, file_id)
         if content_bytes is None:
-            return '', []
+            return '', [], None
 
     # DOCX
     if mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
@@ -285,17 +334,19 @@ def extract_text_and_images(drive_service, file_metadata, content_bytes=None):
         text = extract_text_from_other(content_bytes, mime_type)
         text = clean_text_from_urls(text)
         images = extract_images_from_docx(content_bytes)
-        return text, images
+        date = extract_date_from_text(text)
+        return text, images, date
 
     # Другие форматы
     if mime_type in ['text/plain', 'application/msword']:
         print(f"    📝 File: {file_name}")
         text = extract_text_from_other(content_bytes, mime_type)
         text = clean_text_from_urls(text)
-        return text, []
+        date = extract_date_from_text(text)
+        return text, [], date
 
     print(f"    ⏭️ Skipped: {file_name} ({mime_type})")
-    return '', []
+    return '', [], None
 
 
 def is_image(mime_type):

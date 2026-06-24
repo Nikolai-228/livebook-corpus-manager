@@ -120,36 +120,55 @@ def get_folder_by_path(conn, full_path: str, chapter_id: int) -> int:
 # 4. ДОКУМЕНТЫ (DOCUMENTS)
 # ==========================================================
 
-def save_document(
-        conn,
-        title: str,
-        file_type: str,
-        chapter_id: int,
-        folder_id: int = None,
-        content: str = None,
-        url: str = None
-) -> int:
+def save_document(conn, title, file_type, chapter_id, folder_id, content, url,
+                  date=None, date_uploaded=None, date_imported=None):
     """
-    Сохраняет документ в БД.
+    Сохраняет документ в БД
 
-    Параметры:
-    - title: название документа
-    - file_type: тип файла (pdf, docx, google_doc и т.д.)
-    - chapter_id: ID раздела (обязателен)
-    - folder_id: ID папки (может быть None)
-    - content: текст документа (может быть None)
-    - url: ссылка на Google Drive
-
-    Возвращает ID созданного документа.
+    Args:
+        conn: подключение к БД
+        title: заголовок документа
+        file_type: тип документа (pdf, docx, etc.)
+        chapter_id: ID раздела
+        folder_id: ID папки
+        content: текст документа
+        url: ссылка на файл
+        date: дата написания (опционально)
+        date_uploaded: дата загрузки на диск (опционально)
+        date_imported: дата импорта в БД (опционально)
     """
     with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO documents (title, type, chapter_id, folder_id, content, url)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (title, file_type, chapter_id, folder_id, content, url))
-        conn.commit()
-        return cur.fetchone()[0]
+        # Проверяем существование
+        cur.execute("SELECT id FROM documents WHERE url = %s", (url,))
+        existing = cur.fetchone()
+
+        if existing:
+            # Обновляем существующий документ
+            cur.execute("""
+                UPDATE documents 
+                SET title = %s, 
+                    type = %s, 
+                    chapter_id = %s, 
+                    folder_id = %s, 
+                    content = %s,
+                    date = %s,
+                    date_uploaded = %s,
+                    date_imported = %s
+                WHERE id = %s
+                RETURNING id
+            """, (title, file_type, chapter_id, folder_id, content, date,
+                  date_uploaded, date_imported, existing[0]))
+            return existing[0]
+        else:
+            # Вставляем новый документ
+            cur.execute("""
+                INSERT INTO documents 
+                (title, type, chapter_id, folder_id, content, url, date, date_uploaded, date_imported)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (title, file_type, chapter_id, folder_id, content, url, date,
+                  date_uploaded, date_imported))
+            return cur.fetchone()[0]
 
 
 def get_document(conn, doc_id: int) -> dict:

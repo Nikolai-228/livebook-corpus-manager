@@ -3,11 +3,14 @@
 Парсинг Google Drive с ПОЛНОЙ ОЧИСТКОЙ БД перед началом.
 Удаляет все данные из таблиц chapters, folders, documents, media
 и заполняет заново.
+Добавлены поля: date (дата написания),
+date_uploaded (дата загрузки на диск), date_imported (дата импорта в БД)
 """
 
 import os
 import re
 import io
+from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -22,6 +25,8 @@ from db_utils import (
     print_stats
 )
 from text_extractor import extract_text_and_images, is_image
+
+SAVE_IMAGES = False  # True - сохранять изображения, False - не сохранять
 
 
 # ==========================================================
@@ -53,7 +58,7 @@ def get_all_folder_contents(drive_service, folder_id):
     while True:
         results = drive_service.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
-            fields="nextPageToken, files(id, name, mimeType, modifiedTime, parents)",
+            fields="nextPageToken, files(id, name, mimeType, modifiedTime, parents, createdTime)",
             pageSize=1000,
             pageToken=page_token,
             orderBy='folder,name'
@@ -121,6 +126,18 @@ def parse_folder_recursive(drive_service, conn, chapter_id, folder_id, parent_db
         mime_type = item['mimeType']
         item_id = item['id']
 
+        # Получаем дату создания/загрузки файла на Google Drive
+        created_time = item.get('createdTime')
+        modified_time = item.get('modifiedTime')
+        # Используем createdTime как дату загрузки, если есть, иначе modifiedTime
+        drive_upload_date = created_time if created_time else modified_time
+        if drive_upload_date:
+            # Парсим ISO формат даты
+            try:
+                drive_upload_date = datetime.fromisoformat(drive_upload_date.replace('Z', '+00:00')).date()
+            except:
+                drive_upload_date = None
+
         # ======================================================
         # 2.1 ТЕКСТОВЫЕ ДОКУМЕНТЫ
         # ======================================================
@@ -148,72 +165,106 @@ def parse_folder_recursive(drive_service, conn, chapter_id, folder_id, parent_db
             # Убираем расширение из названия
             clean_title = re.sub(r'\.(docx|pdf|txt|doc|pptx)$', '', item_name, flags=re.IGNORECASE)
 
-            # Извлекаем текст и изображения из документа
+            # Извлекаем текст, изображения и дату из документа
             file_metadata = {
                 'id': item_id,
                 'name': item_name,
                 'mimeType': mime_type
             }
-            extracted_text, images = extract_text_and_images(drive_service, file_metadata)
+
+            print(f"    ⏳ Извлечение текста из документа...")
+            extracted_text, images, doc_date = extract_text_and_images(drive_service, file_metadata)
+
+            # Проверка что текст извлечен
+            if extracted_text:
+                print(f"    ✅ Текст извлечен (длина: {len(extracted_text)} символов)")
+            else:
+                print(f"    ⚠️ Текст не извлечен или пустой")
 
             # URL документа
             doc_url = f"https://drive.google.com/file/d/{item_id}/view"
 
-            # Сохраняем документ в БД (без creation_date — его нет в schema.sql)
-            doc_id = save_document(
-                conn,
-                clean_title,
-                file_type,
-                chapter_id,
-                parent_db_id,
-                extracted_text,
-                doc_url
-            )
-            print(f"    ✅ Документ сохранён (ID: {doc_id})")
+            # Сохраняем документ в БД с новыми полями
+            print(f"    💾 Сохранение документа в БД...")
+            try:
+                doc_id = save_document(
+                    conn,
+                    clean_title,
+                    file_type,
+                    chapter_id,
+                    parent_db_id,
+                    extracted_text,
+                    doc_url,
+                    doc_date,  # дата написания
+                    drive_upload_date,  # дата загрузки на диск
+                    datetime.now().date()  # дата импорта в БД
+                )
+                # Принудительно коммитим каждое сохранение документа
+                conn.commit()
+                print(f"    ✅ Документ сохранён (ID: {doc_id})")
+                if doc_date:
+                    print(f"    📅 Дата написания: {doc_date}")
+                if drive_upload_date:
+                    print(f"    ☁️ Загружен на диск: {drive_upload_date}")
+            except Exception as e:
+                print(f"    ❌ Ошибка при сохранении документа: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
 
-            # ✅ Сохраняем изображения, извлечённые из документа
-            if images:
-                print(f"    🖼️ Извлечено изображений из документа: {len(images)}")
-                for img_name, img_bytes in images:
-                    save_media(
-                        conn,
-                        chapter_id,
-                        img_name,
-                        img_bytes,
-                        parent_db_id,
-                        doc_id
-                    )
-                    print(f"      ✅ Изображение сохранено: {img_name}")
+            # Сохраняем изображения, извлечённые из документа
+            if SAVE_IMAGES:
+                if images:
+                    print(f"    🖼️ Извлечено изображений из документа: {len(images)}")
+                    for img_name, img_bytes in images:
+                        try:
+                            save_media(
+                                conn,
+                                chapter_id,
+                                img_name,
+                                img_bytes,
+                                parent_db_id,
+                                doc_id
+                            )
+                            conn.commit()
+                            print(f"      ✅ Изображение сохранено: {img_name}")
+                        except Exception as e:
+                            print(f"      ❌ Ошибка сохранения изображения {img_name}: {e}")
 
         # ======================================================
         # 2.2 ОТДЕЛЬНЫЕ ИЗОБРАЖЕНИЯ
         # ======================================================
         elif is_image(mime_type):
-            print(f"  🖼️ Изображение (файл): {item_name}")
+            if SAVE_IMAGES:
+                print(f"  🖼️ Изображение (файл): {item_name}")
 
-            try:
-                # Скачиваем изображение через Service Account
-                request = drive_service.files().get_media(fileId=item_id)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, request)
-                done = False
-                while not done:
-                    status, done = downloader.next_chunk()
-                fh.seek(0)
-                img_bytes = fh.read()
+                try:
+                    # Скачиваем изображение через Service Account
+                    request = drive_service.files().get_media(fileId=item_id)
+                    fh = io.BytesIO()
+                    downloader = MediaIoBaseDownload(fh, request)
+                    done = False
+                    while not done:
+                        status, done = downloader.next_chunk()
+                    fh.seek(0)
+                    img_bytes = fh.read()
 
-                # ✅ Сохраняем в БД (без привязки к документу)
-                save_media(
-                    conn,
-                    chapter_id,
-                    item_name,
-                    img_bytes,
-                    parent_db_id,
-                    None
-                )
-                print(f"    ✅ Изображение сохранено: {item_name}")
-            except Exception as e:
-                print(f"    ❌ Ошибка скачивания изображения: {e}")
+                    # Сохраняем в БД (без привязки к документу)
+                    save_media(
+                        conn,
+                        chapter_id,
+                        item_name,
+                        img_bytes,
+                        parent_db_id,
+                        None
+                    )
+                    conn.commit()
+                    print(f"    ✅ Изображение сохранено: {item_name}")
+                except Exception as e:
+                    print(f"    ❌ Ошибка скачивания изображения: {e}")
+            else:
+                # Если SAVE_IMAGES = False, просто пропускаем изображения
+                print(f"  ⏭️ Изображение пропущено (SAVE_IMAGES=False): {item_name}")
 
         # ======================================================
         # 2.3 ОСТАЛЬНЫЕ ТИПЫ ФАЙЛОВ (ПРОПУСКАЕМ)
@@ -232,7 +283,11 @@ def parse_all_chapters_clean():
     print("🚀 ПАРСИНГ С ПОЛНОЙ ОЧИСТКОЙ БД")
     print("   - Все старые данные будут удалены")
     print("   - Все разделы будут перезаписаны")
-    print("   - Изображения сохраняются")
+    if SAVE_IMAGES:
+        print("   - Изображения СОХРАНЯЮТСЯ")
+    else:
+        print("   - Изображения НЕ СОХРАНЯЮТСЯ (только документы)")
+    print("   - Извлекается дата написания документов")
     print("=" * 70)
 
     # 1. Авторизация
@@ -285,6 +340,8 @@ def parse_all_chapters_clean():
             )
         except Exception as e:
             print(f"❌ Ошибка при парсинге раздела {chapter_name}: {e}")
+            import traceback
+            traceback.print_exc()
 
     # 5. Статистика
     print_stats(conn)

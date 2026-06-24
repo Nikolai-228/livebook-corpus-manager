@@ -1,5 +1,3 @@
-
-
 # Модуль парсинга Google Drive
 
 Модуль для автоматического извлечения, обработки и загрузки в базу данных PostgreSQL документов и изображений из Google Drive. Входит в состав проекта **«Живая книга ИМИ — Корпусный менеджер»**.
@@ -15,6 +13,9 @@
 - Извлечение изображений из HTML, DOCX и Google Docs
 - Сохранение данных в структурированную базу данных PostgreSQL
 - **Два режима работы:** полная перезапись или продолжение с того же места
+- **Извлечение даты написания** документов из текста
+- **Сохранение даты загрузки** файла на Google Drive
+- **Автоматическая проверка изображений** в уже существующих документах
 
 ---
 
@@ -22,17 +23,12 @@
 
 ```
 parser/
-
+│
 ├── config.py                          # Конфигурация: API-ключи, разделы, БД
-
 ├── db_utils.py                        # Утилиты для работы с PostgreSQL
-
 ├── text_extractor.py                  # Извлечение текста и изображений из файлов
-
 ├── parse_all_chapters_clean.py        # Полная перезапись БД
-
-├── parse_all_chapters_continue.py     # Продолжение (только новые файлы)
-
+├── parse_all_chapters_continue.py     # Продолжение (только новые файлы + проверка изображений)
 └── livebook-parser-265c1e8112e9.json  # Ключ сервисного аккаунта Google
 ```
 
@@ -55,8 +51,7 @@ psql -U postgres -c "CREATE DATABASE livebook_corpus;"
 psql -U postgres -d livebook_corpus -f schema.sql
 ```
 
-Или создай вручную для дальнейшего автоматического создания всех таблиц, 
-связей индексов и тд (не рекомендовано):
+Или создай вручную для дальнейшего автоматического создания всех таблиц, связей индексов и т.д. (не рекомендовано):
 
 ```sql
 CREATE DATABASE livebook_corpus;
@@ -91,8 +86,8 @@ DATABASE_DSN = "postgresql://postgres:password@localhost:5432/livebook_corpus"
 ```python
 SERVICE_ACCOUNT_FILE = r'путь\к\папке\parser\название_ключа.json'
 ```
-Или запроси файл с ключом у автора модуля, не рекомендовано размещать 
-ключ API в открытых источниках.
+
+Или запроси файл с ключом у автора модуля, не рекомендовано размещать ключ API в открытых источниках.
 
 ### 5. Запуск
 
@@ -102,7 +97,7 @@ SERVICE_ACCOUNT_FILE = r'путь\к\папке\parser\название_ключ
 python parse_all_chapters_clean.py
 ```
 
-**Продолжение** (добавляет только новые файлы):
+**Продолжение** (добавляет только новые файлы и проверяет изображения):
 
 ```bash
 python parse_all_chapters_continue.py
@@ -115,7 +110,7 @@ python parse_all_chapters_continue.py
 | Режим | Скрипт | Что делает |
 |-------|--------|------------|
 | **Полная перезапись** | `parse_all_chapters_clean.py` | 🗑️ Удаляет все данные из `chapters`, `folders`, `documents`, `media` и заполняет заново |
-| **Продолжение** | `parse_all_chapters_continue.py` | ➕ Добавляет только новые файлы, пропускает уже существующие (по `url`) |
+| **Продолжение** | `parse_all_chapters_continue.py` | ➕ Добавляет только новые файлы, пропускает уже существующие (по `url`). **Проверяет изображения** внутри уже существующих документов и добавляет недостающие |
 
 ---
 
@@ -137,6 +132,14 @@ CHAPTERS = [
     {"name": "Стройотряды", "folder_id": "0B7oIjQ46Neu2b0poX0JQVE9iZ1E"},
     # ...
 ]
+```
+
+### Управление сохранением изображений
+
+В каждом из скриптов есть переменная `SAVE_IMAGES`:
+
+```python
+SAVE_IMAGES = True  # True - сохранять изображения, False - не сохранять
 ```
 
 ---
@@ -161,6 +164,16 @@ CHAPTERS = [
 | DOCX | Распаковка `word/media/` |
 | Отдельные файлы | Скачивание через Drive API |
 
+### Даты
+
+Модуль автоматически извлекает и сохраняет три типа дат:
+
+| Поле | Описание | Источник |
+|------|----------|----------|
+| `date` | Дата написания документа | Извлекается из текста (ищется в последних строках) |
+| `date_uploaded` | Дата загрузки на Google Drive | Из метаданных файла (`createdTime`) |
+| `date_imported` | Дата импорта в БД | Текущая дата при сохранении |
+
 ---
 
 ## 📊 Схема данных
@@ -170,12 +183,23 @@ CHAPTERS = [
 ```
 chapters (id, name)
     ├── folders (id, name, parent_folder_id, full_path, chapter_id)
-    ├── documents (id, title, type, chapter_id, folder_id, content, url)
+    ├── documents (id, title, type, chapter_id, folder_id, content, url, date, date_uploaded, date_imported)
     └── media (id, chapter_id, folder_id, document_id, name, media)
 ```
 
----
+### Поля документов
 
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `title` | text | Название документа (без расширения) |
+| `type` | text | Тип документа (pdf, docx, google_doc, txt, doc) |
+| `content` | text | Извлечённый текст |
+| `url` | text | Ссылка на файл в Google Drive |
+| `date` | date | Дата написания документа (извлекается из текста) |
+| `date_uploaded` | date | Дата загрузки файла на диск |
+| `date_imported` | date | Дата импорта в БД |
+
+---
 
 ## ⚙️ Требования
 
@@ -196,6 +220,5 @@ chapters (id, name)
 
 ---
 
-**Автор модуля:** Дресвянников Николай (nikolaj192005@mail.ru) 
+**Автор модуля:** Николай Дресвянников (nikolaj192005@mail.ru)  
 **Проект:** [livebook-corpus-manager](https://github.com/Nikolai-228/livebook-corpus-manager)
-```
