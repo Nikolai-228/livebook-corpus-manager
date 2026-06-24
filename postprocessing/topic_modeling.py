@@ -319,15 +319,14 @@ def ensure_topic_id_column(conn):
 
 def create_topics_table(conn):
     """
-    Создает таблицу topics_summary для хранения описаний тем
+    Создает таблицу topics_summary с одним полем id
     """
     cursor = conn.cursor()
 
-    # Создаем таблицу topics_summary
+    # Создаем таблицу topics_summary с id как PRIMARY KEY
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS topics_summary (
-            id SERIAL PRIMARY KEY,
-            topic_id INTEGER UNIQUE,
+            id INTEGER PRIMARY KEY,  -- это и есть topic_id (начинается с 1)
             name VARCHAR(500),
             keywords TEXT,
             doc_count INTEGER,
@@ -338,13 +337,11 @@ def create_topics_table(conn):
     logger.info("   ✅ Таблица topics_summary создана/проверена")
 
 
-# postprocessing/topic_modeling.py (исправленная функция save_topics_to_db)
-
 def save_topics_to_db(conn, doc_ids, topics, topic_model):
     """
     Сохраняет темы в БД:
-    1. Обновляет поле topic_id в таблице documents (используем topic_id из модели + 1)
-    2. Сохраняет описания тем в таблицу topics_summary с topic_id = topic_id_модели + 1
+    1. Обновляет поле topic_id в таблице documents (topic_id + 1)
+    2. Сохраняет описания тем в таблицу topics_summary с id = topic_id + 1
     """
     logger.info("\n💾 СОХРАНЕНИЕ ТЕМ В БД...")
 
@@ -356,11 +353,11 @@ def save_topics_to_db(conn, doc_ids, topics, topic_model):
     # 2. Убеждаемся, что таблица topics_summary существует
     create_topics_table(conn)
 
-    # 3. Очищаем старые данные и СБРАСЫВАЕМ СЧЕТЧИК ID
-    logger.info("   Очистка таблицы topics_summary с обнулением ID...")
-    cursor.execute("TRUNCATE TABLE topics_summary RESTART IDENTITY")
+    # 3. Очищаем старые данные
+    logger.info("   Очистка таблицы topics_summary...")
+    cursor.execute("TRUNCATE TABLE topics_summary")
     conn.commit()
-    logger.info("   ✅ Таблица topics_summary очищена, ID сброшены")
+    logger.info("   ✅ Таблица topics_summary очищена")
 
     # 4. Сохраняем описания тем
     logger.info("   Сохранение описаний тем...")
@@ -382,9 +379,7 @@ def save_topics_to_db(conn, doc_ids, topics, topic_model):
         # Очищаем название: убираем первую цифру и подчеркивание после нее
         clean_name = name
         if clean_name:
-            # Убираем "0_", "1_", "2_" и т.д. в начале
             clean_name = re.sub(r'^\d+_', '', clean_name)
-            # Если название стало пустым, ставим дефолтное
             if not clean_name or clean_name.strip() == '':
                 clean_name = f"Тема {display_topic_id}"
 
@@ -395,21 +390,20 @@ def save_topics_to_db(conn, doc_ids, topics, topic_model):
         else:
             keywords = "Документы без четкой темы"
 
-        # Сохраняем с display_topic_id как PRIMARY ключ
+        # Сохраняем с display_topic_id как PRIMARY KEY (поле id)
         cursor.execute("""
-            INSERT INTO topics_summary (topic_id, name, keywords, doc_count)
+            INSERT INTO topics_summary (id, name, keywords, doc_count)
             VALUES (%s, %s, %s, %s)
         """, (display_topic_id, clean_name, keywords, count))
 
     conn.commit()
-    logger.info(f"   ✅ Сохранено {len(topic_info)} тем в topics_summary (topic_id начинаются с 1)")
+    logger.info(f"   ✅ Сохранено {len(topic_info)} тем в topics_summary")
 
-    # 5. Обновляем документы (поле topic_id) - также преобразуем ID
+    # 5. Обновляем документы (поле topic_id)
     logger.info("   Обновление документов...")
     updated_count = 0
 
     for doc_id, model_topic_id in zip(doc_ids, topics):
-        # Преобразуем topic_id для документов
         if model_topic_id >= 0:
             display_topic_id = model_topic_id + 1
         else:
@@ -422,7 +416,6 @@ def save_topics_to_db(conn, doc_ids, topics, topic_model):
         """, (display_topic_id, doc_id))
         updated_count += 1
 
-        # Периодический коммит
         if updated_count % 100 == 0:
             conn.commit()
             logger.info(f"   Обновлено {updated_count} документов...")
@@ -434,10 +427,10 @@ def save_topics_to_db(conn, doc_ids, topics, topic_model):
     logger.info("\n📋 ПРИМЕР СОХРАНЕННЫХ ТЕМ:")
     logger.info("-" * 70)
     cursor.execute("""
-        SELECT topic_id, name, doc_count 
+        SELECT id, name, doc_count 
         FROM topics_summary 
-        WHERE topic_id != -1
-        ORDER BY topic_id 
+        WHERE id != -1
+        ORDER BY id 
         LIMIT 10
     """)
     examples = cursor.fetchall()
