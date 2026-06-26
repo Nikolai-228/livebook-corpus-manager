@@ -18,12 +18,8 @@
 
 ## Структура проекта
 - `backend/` — API и корпусный менеджер  
-- `parser/` — скрипты для выгрузки данных с Google Drive  
+- `parser/` — скрипты для выгрузки данных с Google Drive
+- `postprocessing/` — модуль постобработки загруженных данных
+- `create_db/` — схема для создания БД 
 - `linguistics/` — лингвистические модули  
 - `frontend/` — пользовательский интерфейс  
-
-## Запуск (будет дополняться)
-1. Установить PostgreSQL, создать БД `livebook_corpus`
-2. Выполнить `backend/migrations/init_db.sql`
-3. Настроить ключ Google Drive API в `parser/config.py`
-4. Запустить `python parser/drive_parser.py`
